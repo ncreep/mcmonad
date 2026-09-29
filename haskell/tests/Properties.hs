@@ -23,6 +23,7 @@ import MCMonad.Persistence
 import MCMonad.Operations
     ( frameAtParkCorner, reassignScreens
     , chooseOriginTag, pruneReclaims, reclaimOriginTTL, reclaimOriginCap
+    , placeManaged
     )
 import MCMonad.Sway (viewOnScreen)
 import MCMonad.Layout (Full(..))
@@ -1575,6 +1576,23 @@ prop_fullLayout_places_only_focused :: WindowRef -> [WindowRef] -> [WindowRef] -
 prop_fullLayout_places_only_focused f up down (SD r) =
     pureLayout Full r (W.Stack f up down) == [(f, r)]
 
+-- Destroy/recreate route wins over a pinning manage-hook transform
+prop_placeManaged_origin_beats_hook :: TestStackSet -> WindowRef -> Property
+prop_placeManaged_origin_beats_hook ss w =
+    not (W.member w ss) ==>
+    forAll (elements tags) $ \origin -> forAll (elements tags) $ \pin ->
+        W.findTag w (placeManaged w (Just origin) (W.shiftWin pin w) ss) == Just origin
+  where tags = map W.tag (W.workspaces ss)
+
+-- With no origin, the manage hook alone places a new window
+prop_placeManaged_no_origin_is_hook :: TestStackSet -> WindowRef -> Property
+prop_placeManaged_no_origin_is_hook ss w =
+    not (W.member w ss) ==>
+    forAll (elements tags) $ \pin ->
+        placeManaged w Nothing (W.shiftWin pin w) ss
+            == W.shiftWin pin w (W.insertUp w ss)
+  where tags = map W.tag (W.workspaces ss)
+
 -- A focused window is routed to a hidden workspace exactly when it lives on one
 prop_onHiddenWorkspace_matches_hidden_stacks :: TestStackSet -> WindowRef -> Bool
 prop_onHiddenWorkspace_matches_hidden_stacks ss w =
@@ -1725,6 +1743,9 @@ allProperties =
     , ("reclaim: prune keeps fresh entries",          property prop_pruneReclaims_keeps_fresh)
 
     , ("Full layout places only the focused window",  property prop_fullLayout_places_only_focused)
+
+    , ("placeManaged: origin route beats pinning hook", property prop_placeManaged_origin_beats_hook)
+    , ("placeManaged: no origin defers to hook",        property prop_placeManaged_no_origin_is_hook)
     , ("focus: hidden-workspace window is routed",    property prop_onHiddenWorkspace_matches_hidden_stacks)
     , ("focus: hidden-workspace follow requires frontmost app", property prop_shouldFollowIntoHidden_requires_both)
     ]

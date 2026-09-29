@@ -19,6 +19,7 @@ module MCMonad.Operations
     , reclaimOriginCap
     , pruneReclaims
     , chooseOriginTag
+    , placeManaged
       -- * Overlay snapshot
     , buildOverlaySnapshot
     , pushOverlaySnapshot
@@ -673,6 +674,19 @@ pruneReclaims now m
   where
     fresh = M.filter (\(_, at) -> diffUTCTime now at <= reclaimOriginTTL) m
 
+-- | Insert a window, apply the manage hook's transform, then the
+-- destroy/recreate route. The route runs last, so it wins when both apply;
+-- with no origin it is 'id'.
+placeManaged
+    :: WindowRef
+    -> Maybe String
+    -> (W.StackSet String l WindowRef ScreenId ScreenDetail
+        -> W.StackSet String l WindowRef ScreenId ScreenDetail)
+    -> W.StackSet String l WindowRef ScreenId ScreenDetail
+    -> W.StackSet String l WindowRef ScreenId ScreenDetail
+placeManaged wr originTag transform =
+    maybe id (`W.shiftWin` wr) originTag . transform . W.insertUp wr
+
 -- | Manage a new window: run the manage hook, insert it into the current
 -- workspace, and apply any hook-specified transformations (float, shift, etc.).
 manage :: WindowInfo -> ManageHook -> M ()
@@ -682,13 +696,21 @@ manage wi hook = do
     ws <- gets windowset
     when (not (W.member wr ws)) $ do
         Endo transform <- userCodeDef (Endo id) (runManageHook hook wi)
-        -- Destroy/recreate learnedAffinity: if this pid's last window was
-        -- destroyed recently ('unmanagedOrigin'), this window is its
-        -- replacement — Gecko destroys and recreates the NSWindow
-        -- across a native-fullscreen round-trip — so route it back to
-        -- the workspace the destroyed window lived on. The route runs
-        -- before the manage hook's transform, so an explicit doShift
-        -- in the user's config still wins.
+        -- Destroy/recreate routing: if this pid's last window was
+        -- destroyed recently ('unmanagedOrigin'), or this exact window
+        -- was offered again ('reclaimOrigin'), it is not a genuinely
+        -- new window — it's a window mcmonad has already seen,
+        -- continuing under a new identity (Gecko destroys and
+        -- recreates the NSWindow across a native-fullscreen
+        -- round-trip; mcmonad-core's reconcile sweep can re-offer a
+        -- window a bogus destroy took away). Route it back to the
+        -- workspace it already belonged to. The route runs *after*
+        -- the manage hook's transform and wins when both apply, so a
+        -- pinning rule like @doShift@ in the user's config only
+        -- places a window the first time mcmonad sees it — it can't
+        -- yank an already-known window back to a pinned workspace
+        -- after the user has moved it elsewhere. 'route' is 'id' when
+        -- there is no origin, so a genuinely new window is unaffected.
         now <- io getCurrentTime
         origins <- gets unmanagedOrigin
         reclaims <- gets reclaimOrigin
@@ -697,13 +719,12 @@ manage wi hook = do
                                  ++ W.hidden ws)
             originTag =
                 chooseOriginTag now allTags wr (wiPid wi) reclaims origins
-            route = maybe id (`W.shiftWin` wr) originTag
         modify $ \s -> s
             { windowMetadata  = M.insert wr (metadataFromInfo wi) (windowMetadata s)
             , unmanagedOrigin = M.delete (wiPid wi) (unmanagedOrigin s)
             , reclaimOrigin   = M.delete wr (pruneReclaims now (reclaimOrigin s))
             }
-        windows (transform . route . W.insertUp wr)
+        windows (placeManaged wr originTag transform)
         -- A window routed to a hidden workspace never enters the
         -- visible set, so the 'windows' call above did not change it
         -- and issued no hides — the new window would sit on screen at
