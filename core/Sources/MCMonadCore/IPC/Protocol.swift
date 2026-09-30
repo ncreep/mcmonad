@@ -227,15 +227,16 @@ struct OverlayScreenEntry: Codable, Sendable {
     let screenId: Int
     let frame: CGRect
     let workspaceTag: String
+    let isActive: Bool
     let windows: [OverlayWindowEntry]
 
     private enum CodingKeys: String, CodingKey {
-        case screenId, frame, workspaceTag, windows
+        case screenId, frame, workspaceTag, isActive, windows
     }
 
-    init(screenId: Int, frame: CGRect, workspaceTag: String, windows: [OverlayWindowEntry]) {
+    init(screenId: Int, frame: CGRect, workspaceTag: String, isActive: Bool, windows: [OverlayWindowEntry]) {
         self.screenId = screenId; self.frame = frame
-        self.workspaceTag = workspaceTag; self.windows = windows
+        self.workspaceTag = workspaceTag; self.isActive = isActive; self.windows = windows
     }
 
     init(from decoder: Decoder) throws {
@@ -243,6 +244,7 @@ struct OverlayScreenEntry: Codable, Sendable {
         screenId = try c.decode(Int.self, forKey: .screenId)
         frame = try c.decode(FlatRect.self, forKey: .frame).cgRect
         workspaceTag = try c.decode(String.self, forKey: .workspaceTag)
+        isActive = try c.decode(Bool.self, forKey: .isActive)
         windows = try c.decode([OverlayWindowEntry].self, forKey: .windows)
     }
 
@@ -251,6 +253,7 @@ struct OverlayScreenEntry: Codable, Sendable {
         try c.encode(screenId, forKey: .screenId)
         try c.encode(FlatRect(frame), forKey: .frame)
         try c.encode(workspaceTag, forKey: .workspaceTag)
+        try c.encode(isActive, forKey: .isActive)
         try c.encode(windows, forKey: .windows)
     }
 }

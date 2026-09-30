@@ -10,7 +10,7 @@ import MCMonad.Core
     , withinSettleWindow, consumeIntent
     , PendingWindow(..), Timer(..), LayoutClass(..)
     )
-import MCMonad.IPC (WindowInfo(..), Command(..))
+import MCMonad.IPC (WindowInfo(..), Command(..), OverlayScreenEntry(..))
 import MCMonad.Main (onHiddenWorkspace, shouldFollowIntoHidden)
 import MCMonad.Affinity
 import qualified Data.Aeson as Aeson
@@ -1420,6 +1420,12 @@ prop_ocr_index_wire on =
         , counterexample json (property (("\"on\":" ++ (if on then "true" else "false")) `L.isInfixOf` json))
         ]
 
+-- The overlay screen entry carries its isActive flag on the wire
+prop_overlayScreen_wire_is_active :: Bool -> Property
+prop_overlayScreen_wire_is_active active =
+    let json = BL.unpack (Aeson.encode (OverlayScreenEntry 0 (Rectangle 0 0 1 1) "1" active []))
+    in counterexample json (property (("\"isActive\":" ++ (if active then "true" else "false")) `L.isInfixOf` json))
+
 -- ---------------------------------------------------------------------------
 -- Workspace → screen affinity
 
@@ -1620,6 +1626,7 @@ allProperties =
     , ("affinity: place pulls back a stranded role-mate", property prop_place_pulls_back_stranded_role_mate)
     , ("affinity: role names round trip", property prop_role_names_round_trip)
     , ("ocr-index wire format", property prop_ocr_index_wire)
+    , ("overlay screen wire carries isActive", property prop_overlayScreen_wire_is_active)
     , ("timer persistence + legacy snapshot", property prop_timer_persistence)
     , ("invariant",               property prop_invariant)
     , ("focusUp/focusDown",       property prop_focusUp_focusDown)

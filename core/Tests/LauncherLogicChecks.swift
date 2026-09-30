@@ -17,6 +17,7 @@ enum LauncherLogicChecks {
         checkWhatsUp()
         checkWhatsUpCache()
         checkRecency()
+        checkOverlayScreenWire()
         print("Launcher logic checks passed")
     }
 
@@ -92,9 +93,9 @@ enum LauncherLogicChecks {
         let snap = OverlaySnapshot(
             debugOverlays: false,
             screens: [
-                OverlayScreenEntry(screenId: 0, frame: .zero, workspaceTag: "3",
+                OverlayScreenEntry(screenId: 0, frame: .zero, workspaceTag: "3", isActive: true,
                                    windows: [w(7, "Ghostty", "deploy notes", focused: true)]),
-                OverlayScreenEntry(screenId: 1, frame: .zero, workspaceTag: "2", windows: []),
+                OverlayScreenEntry(screenId: 1, frame: .zero, workspaceTag: "2", isActive: false, windows: []),
             ],
             hiddenWorkspaces: [
                 OverlayHiddenWorkspace(tag: "o5", windows: [w(9, "Chrome", "cats"), w(11, "?", "")]),
@@ -179,7 +180,7 @@ enum LauncherLogicChecks {
         }
         func snap(_ screens: [(String, [OverlayWindowEntry])], _ hidden: [(String, [OverlayWindowEntry])]) -> OverlaySnapshot {
             OverlaySnapshot(debugOverlays: false,
-                            screens: screens.enumerated().map { OverlayScreenEntry(screenId: $0.offset, frame: .zero, workspaceTag: $0.element.0, windows: $0.element.1) },
+                            screens: screens.enumerated().map { OverlayScreenEntry(screenId: $0.offset, frame: .zero, workspaceTag: $0.element.0, isActive: $0.offset == 0, windows: $0.element.1) },
                             hiddenWorkspaces: hidden.map { OverlayHiddenWorkspace(tag: $0.0, windows: $0.1) })
         }
         var hashes: [UInt32: Int] = [7: 1]
@@ -237,5 +238,16 @@ enum LauncherLogicChecks {
         precondition(RecentUse.window(12) == "w:12")
         precondition(RecentUse.app(bundleId: "com.x", path: "/p") == "a:com.x")
         precondition(RecentUse.app(bundleId: nil, path: "/p") == "a:/p")
+    }
+
+    // MARK: OverlayScreenEntry wire
+
+    static func checkOverlayScreenWire() {
+        for active in [true, false] {
+            let entry = OverlayScreenEntry(screenId: 1, frame: .zero, workspaceTag: "2", isActive: active, windows: [])
+            let data = try! JSONEncoder().encode(entry)
+            let back = try! JSONDecoder().decode(OverlayScreenEntry.self, from: data)
+            precondition(back.isActive == active && back.screenId == 1 && back.workspaceTag == "2", "\(active)")
+        }
     }
 }

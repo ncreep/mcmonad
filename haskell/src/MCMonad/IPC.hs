@@ -132,6 +132,7 @@ data OverlayScreenEntry = OverlayScreenEntry
     { oseScreenId     :: !Int
     , oseFrame        :: !Rectangle
     , oseWorkspaceTag :: !String
+    , oseIsActive     :: !Bool
     , oseWindows      :: ![OverlayWindowEntry]
     } deriving (Show, Generic)
 
@@ -167,6 +168,7 @@ instance Aeson.ToJSON OverlayScreenEntry where
         [ "screenId"     .= oseScreenId
         , "frame"        .= oseFrame
         , "workspaceTag" .= oseWorkspaceTag
+        , "isActive"     .= oseIsActive
         , "windows"      .= oseWindows
         ]
 

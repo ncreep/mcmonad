@@ -416,9 +416,10 @@ struct MCMonadCoreApp {
             quiet: { ScreenIndex.secondsSinceInput() >= ScreenIndex.idleAfter }
         )
         spotlight.whatsUpCache = whatsUpCache
-        overlayManager.onSnapshotApplied = { [weak screenIndex, weak whatsUpCache] snapshot in
+        overlayManager.onSnapshotApplied = { [weak screenIndex, weak whatsUpCache, weak statusBar] snapshot in
             screenIndex?.noteSnapshot(snapshot)
             whatsUpCache?.noteSnapshot(snapshot)
+            statusBar?.refreshIcon()
         }
         screenIndex.onUpdated = { [weak spotlight, weak whatsUpCache] in
             spotlight?.screenIndexUpdated()
@@ -593,8 +594,12 @@ struct MCMonadCoreApp {
         }
 
         // Wire display change callbacks to socket events
-        displayManager.onScreensChanged = { screens in
+        displayManager.onScreensChanged = { [weak statusBar] screens in
             socketServer.send(.screensChanged(screens: screens))
+            // The connected-screen count just changed; redraw with
+            // whatever snapshot is cached now (Haskell's own screens-
+            // changed-triggered snapshot will correct it moments later).
+            statusBar?.refreshIcon()
         }
         displayManager.startObserving()
 

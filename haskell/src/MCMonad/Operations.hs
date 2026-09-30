@@ -516,6 +516,7 @@ buildOverlaySnapshot = do
             { oseScreenId     = let S s = W.screen scr in s
             , oseFrame        = screenRect (W.screenDetail scr)
             , oseWorkspaceTag = W.tag (W.workspace scr)
+            , oseIsActive     = W.screen scr == W.screen (W.current ws)
             , oseWindows      = workspaceWindows ws meta rects focused (W.workspace scr)
             }
         mkHidden wsp = OverlayHiddenWorkspace
