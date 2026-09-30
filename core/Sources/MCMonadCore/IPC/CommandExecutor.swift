@@ -194,14 +194,19 @@ final class CommandExecutor {
             }
         }
 
-        skylight.reenableUpdate()
-
-        // Phase 4: Raise visible windows (AXRaise only, no app activation —
-        // NSRunningApplication.activate() would bring ALL windows of that app
-        // to front, including hidden ones on other workspaces)
-        for (_, ax) in resolved {
-            AXUIElementPerformAction(ax, kAXRaiseAction as CFString)
+        // Phase 4: order windows to the front via SkyLight, not AXRaise —
+        // AXRaise also shifts OS keyboard focus, which would steal focus
+        // across screens for windows unrelated to the actual focus change.
+        // Kept inside the disableUpdate bracket along with the position/size
+        // writes above: raising after reenableUpdate would let the window
+        // server composite and show the moved-but-not-yet-raised state as
+        // its own separate repaint, on top of whatever phase 1-3 already
+        // produced -- two visible updates where there should be one.
+        for (a, _) in resolved {
+            skylight.orderWindow(a.windowId, relativeTo: 0, order: .above)
         }
+
+        skylight.reenableUpdate()
 
         // Phase 5: deterministic readback. Independent of the SkyLight
         // observer (which is coalesced and silenced for moves inside the
