@@ -21,6 +21,7 @@ module MCMonad.Operations
     , pruneReclaims
     , chooseOriginTag
     , placeManaged
+    , windowsToPark
       -- * Overlay snapshot
     , buildOverlaySnapshot
     , pushOverlaySnapshot
@@ -196,28 +197,25 @@ windows f = do
     conn <- asks connection
     prevMapped <- gets mapped
 
-    -- 2. Hide every window that should NOT be visible — declaratively, across
-    --    ALL workspaces, not just the ones that were visible last cycle. A
-    --    window parked on a hidden workspace that drifted back on-screen (a
-    --    prior off-screen clamp, or an app re-asserting its own position) is
-    --    therefore re-parked on the next switch, instead of being remembered
-    --    as "already hidden" forever (the bug behind the stuck background).
-    --    Never hide sticky windows. Fire only when the visible set actually
-    --    changed, so pure focus-follows-mouse churn doesn't re-issue hides on
-    --    every event.
+    -- 2. Work out which windows should no longer be visible —
+    --    declaratively, across ALL workspaces, not just the ones that were
+    --    visible last cycle. A window parked on a hidden workspace that
+    --    drifted back on-screen (a prior off-screen clamp, or an app
+    --    re-asserting its own position) is therefore re-parked on the next
+    --    switch, instead of being remembered as "already hidden" forever
+    --    (the bug behind the stuck background). Never hide sticky windows.
+    --    Only fire when the visible set actually changed, so pure
+    --    focus-follows-mouse churn doesn't re-issue hides on every event.
+    --    Sent later, in step 6, after the new frames.
     let visibleChanged = S.fromList newVisible /= prevMapped
         toHide = filter (\w -> w `notElem` newVisible && not (S.member w stickySet))
                         (allManagedWindows currentAfterSticky)
     io $ hPutStrLn stderr $ "WINDOWS: visibleChanged=" ++ show visibleChanged
         ++ " newVisible=" ++ show (length newVisible)
         ++ " toHide=" ++ show (map wrWindowId toHide)
-    when (visibleChanged && not (null toHide)) $
-        io $ sendCommand conn (HideWindows (map wrWindowId toHide))
 
     -- 3. Show windows that became visible
     let toShow = filter (`notElem` oldVisible) newVisible
-    unless (null toShow) $
-        io $ sendCommand conn (ShowWindows (map wrWindowId toShow))
 
     -- 4. Run layouts for each visible screen. Lay out
     --    'currentAfterSticky', not the raw @f old@: step 1b may have
@@ -268,19 +266,26 @@ windows f = do
                               && not (S.member w laidOutWindows)
                               && not (M.member w (W.floating currentAfterSticky)))
                           (allManagedWindows currentAfterSticky)
-    unless (null orphaned) $
-        io $ sendCommand conn (HideWindows (map wrWindowId orphaned))
 
     -- 5. Resolve floating window positions
     currentWS <- gets windowset
     let floatRects = resolveFloating currentWS
 
-    -- 6. Send frame assignments
+    -- 6. Send frame assignments, then show/hide. Placing (and raising)
+    --    the incoming windows before parking the outgoing ones avoids a
+    --    gap where neither covers the screen.
     let allPositions = allRects ++ floatRects
         frames = map toFrameAssignment allPositions
     io $ hPutStrLn stderr $ "FRAMES: " ++ show [(wrWindowId w, rect_x r, rect_y r, rect_w r, rect_h r) | (w, r) <- allPositions]
     unless (null frames) $
         io $ sendCommand conn (SetFrames frames)
+
+    unless (null toShow) $
+        io $ sendCommand conn (ShowWindows (map wrWindowId toShow))
+
+    let toHideAll = windowsToPark visibleChanged toHide orphaned
+    unless (null toHideAll) $
+        io $ sendCommand conn (HideWindows (map wrWindowId toHideAll))
 
     -- 6b. Store window positions for directional focus navigation
     modify $ \s -> s { windowRects = M.fromList allPositions }
@@ -737,6 +742,14 @@ placeManaged
     -> W.StackSet String l WindowRef ScreenId ScreenDetail
 placeManaged wr originTag transform =
     maybe id (`W.shiftWin` wr) originTag . transform . W.insertUp wr
+
+-- | Windows to park after a pass. Orphans (windows a layout left without a
+-- rect) are always parked; the windows leaving the visible set only when
+-- that set changed.
+windowsToPark :: Bool -> [WindowRef] -> [WindowRef] -> [WindowRef]
+windowsToPark visibleChanged leaving orphaned
+    | visibleChanged = leaving ++ orphaned
+    | otherwise = orphaned
 
 -- | Manage a new window: run the manage hook, insert it into the current
 -- workspace, and apply any hook-specified transformations (float, shift, etc.).

@@ -24,7 +24,7 @@ import MCMonad.Persistence
 import MCMonad.Operations
     ( frameAtParkCorner, reassignScreens
     , chooseOriginTag, pruneReclaims, reclaimOriginTTL, reclaimOriginCap
-    , placeManaged
+    , placeManaged, windowsToPark
     , attributeIgnoredWindows
     )
 import MCMonad.Sway (viewOnScreen)
@@ -1608,6 +1608,14 @@ prop_overlayIgnored_wire wid pid =
     in counterexample json $ property $
         ("\"windowId\":" ++ show wid) `L.isInfixOf` json && ("\"pid\":" ++ show pid) `L.isInfixOf` json
 
+-- Parking after a pass: orphans always, leavers only when the visible set changed
+prop_windowsToPark_unchanged_parks_orphans :: [WindowRef] -> [WindowRef] -> Bool
+prop_windowsToPark_unchanged_parks_orphans leaving orphaned =
+    windowsToPark False leaving orphaned == orphaned
+
+prop_windowsToPark_changed_parks_both :: [WindowRef] -> [WindowRef] -> Bool
+prop_windowsToPark_changed_parks_both leaving orphaned =
+    windowsToPark True leaving orphaned == leaving ++ orphaned
 
 -- A focused window is routed to a hidden workspace exactly when it lives on one
 prop_onHiddenWorkspace_matches_hidden_stacks :: TestStackSet -> WindowRef -> Bool
@@ -1795,6 +1803,9 @@ allProperties =
 
     , ("placeManaged: origin route beats pinning hook", property prop_placeManaged_origin_beats_hook)
     , ("placeManaged: no origin defers to hook",        property prop_placeManaged_no_origin_is_hook)
+
+    , ("parking: unchanged set parks only orphans",     property prop_windowsToPark_unchanged_parks_orphans)
+    , ("parking: changed set parks leavers and orphans", property prop_windowsToPark_changed_parks_both)
     , ("focus: hidden-workspace window is routed",    property prop_onHiddenWorkspace_matches_hidden_stacks)
     , ("focus: hidden-workspace follow requires frontmost app", property prop_shouldFollowIntoHidden_requires_both)
 

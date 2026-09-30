@@ -429,6 +429,12 @@ final class CommandExecutor {
         // it, independently per axis, falling back to shrinking the parked
         // size (rather than picking an edge that spills) only when a
         // screen's arrangement leaves no free edge at all (e.g. a 2x2 grid).
+        //
+        // Batched the same way executeSetFrames batches its writes: without
+        // this bracket, the window server composites and redraws after each
+        // individual park move, so parking several windows for one switch
+        // shows as that many separate repaints instead of one.
+        SkyLight.shared.disableUpdate()
         for wid in windowIds {
             guard let snap = SkyLightQuery.queryWindow(wid) else {
                 FrameLog.emit(source: .cmdHideMove, windowId: wid, result: "no-snap")
@@ -471,6 +477,7 @@ final class CommandExecutor {
                 currentHint: snap.frame
             )
         }
+        SkyLight.shared.reenableUpdate()
     }
 
     private func executeShowWindows(_ windowIds: [UInt32]) {
