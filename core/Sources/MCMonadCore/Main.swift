@@ -349,12 +349,74 @@ final class EventBridge: SkyLightEventDelegate {
             TitleHash.invalidate(windowId: windowId)
         }
     }
+
+    /// Centers every managed window on its screen. mcmonad has no macOS
+    /// Space to fall back on for hidden workspaces — they're simulated by
+    /// parking windows almost entirely off-screen (see
+    /// 'executeHideWindows') — so unlike AeroSpace, which parks the same
+    /// way but restores on quit, killing mcmonad with no equivalent
+    /// cleanup leaves every hidden window stuck off-screen forever.
+    ///
+    /// Deliberately unconditional, rather than only restoring windows
+    /// detected as parked: a parked frame drifts away from its exact
+    /// corner between re-asserts (AppKit nudges a mostly-off-screen
+    /// window back on-screen on its own; see the comment on
+    /// 'executeHideWindows'), so a tight "is this parked" geometry check
+    /// misses drifted windows. Recentering an already-visible window too
+    /// is harmless here: the process is exiting either way, so mcmonad
+    /// is giving up layout control of every window at once, same as
+    /// AeroSpace's own termination handler does.
+    ///
+    /// Exception to Rule 1 (no window-placement decisions in core): this is
+    /// an exit-time mitigation. It runs after mcmonad has stopped taking
+    /// layout actions, so the brain is not involved and no frames are sent
+    /// to it for this purpose.
+    func restoreAllParkedWindows(displayManager: DisplayManager) {
+        let screens = displayManager.currentScreens()
+        guard !screens.isEmpty else { return }
+        for wid in managedWindowIds {
+            // SkyLightQuery's cached frame can lag behind an AX-only move
+            // (parking is done via AX, which SkyLight doesn't resync on) —
+            // read the live AX frame instead, same ground truth parking
+            // itself writes to.
+            guard let pid = windowIdToPid[wid],
+                  let frame = AXWindowService.readFrame(windowId: wid, pid: pid),
+                  let home = homeScreen(for: frame, among: screens)
+            else { continue }
+            AXWindowService.setFrame(
+                centeredFrame(of: frame.size, on: home.frame),
+                windowId: wid,
+                pid: pid,
+                currentHint: frame
+            )
+        }
+    }
+}
+
+/// Set right before the process exits — see 'installTerminationHandler'.
+@MainActor private var terminationCleanup: (() -> Void)?
+
+/// Installs a SIGTERM/SIGINT handler that restores parked windows before
+/// the process actually exits (mirrors AeroSpace's own termination
+/// handler). SIGKILL can't be caught, so a hard kill still loses the
+/// cleanup — only a cooperative stop (e.g. `launchctl stop`, plain `kill`)
+/// is covered.
+private func installTerminationHandler() {
+    let handle: sig_t = { sig in
+        Task { @MainActor in
+            terminationCleanup?()
+            exit(sig)
+        }
+    }
+    signal(SIGTERM, handle)
+    signal(SIGINT, handle)
 }
 
 @main
 struct MCMonadCoreApp {
     static func main() {
         logger.info("mcmonad-core starting")
+        installTerminationHandler()
 
         // 1. Check / prompt accessibility permission.
         // Remember what the executable looked like at launch, so a later
@@ -612,6 +674,11 @@ struct MCMonadCoreApp {
         let eventBridge = EventBridge(socketServer: socketServer, focusTracker: focusTracker)
         let eventObserver = SkyLightEventObserver.shared
         eventObserver.delegate = eventBridge
+
+        terminationCleanup = { [weak eventBridge, weak displayManager] in
+            guard let eventBridge, let displayManager else { return }
+            eventBridge.restoreAllParkedWindows(displayManager: displayManager)
+        }
 
         // Bootstrap existing-at-startup windows into the event bridge so
         // their pids enrol AXFocusTracker. SkyLight 'created' only fires

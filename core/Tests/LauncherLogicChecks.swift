@@ -20,6 +20,7 @@ enum LauncherLogicChecks {
         checkOverlayScreenWire()
         checkWorkspaceWindowLookup()
         checkParkGeometry()
+        checkParkedHome()
         print("Launcher logic checks passed")
     }
 
@@ -314,5 +315,24 @@ enum LauncherLogicChecks {
             info(4, CGRect(x: 1000, y: 1600, width: 1000, height: 800)),
         ]
         precondition(freeCorner(for: center, among: boxed, windowSize: size).1 == CGSize(width: 2, height: 2))
+    }
+
+    // MARK: Parked window home
+
+    static func checkParkedHome() {
+        func info(_ id: Int, _ frame: CGRect) -> ScreenInfo {
+            ScreenInfo(screenId: id, frame: frame, uuid: "u\(id)", name: "s\(id)", role: .primary)
+        }
+        let screens = [info(0, CGRect(x: 0, y: 0, width: 1000, height: 800)),
+                       info(1, CGRect(x: 1000, y: 0, width: 1000, height: 800))]
+        // the corner parks chosen by freeCorner resolve back to their own screen
+        precondition(homeScreen(for: CGRect(x: 1999, y: 799, width: 400, height: 300), among: screens)?.screenId == 1)
+        precondition(homeScreen(for: CGRect(x: -399, y: 799, width: 400, height: 300), among: screens)?.screenId == 0)
+        precondition(homeScreen(for: CGRect(x: 5000, y: 5000, width: 10, height: 10), among: screens) != nil, "no overlap still yields a screen")
+        precondition(homeScreen(for: .zero, among: []) == nil)
+        precondition(centeredFrame(of: CGSize(width: 400, height: 300), on: CGRect(x: 0, y: 0, width: 1000, height: 800))
+            == CGRect(x: 300, y: 250, width: 400, height: 300))
+        precondition(centeredFrame(of: CGSize(width: 400, height: 300), on: CGRect(x: 1000, y: 0, width: 1000, height: 800))
+            == CGRect(x: 1300, y: 250, width: 400, height: 300))
     }
 }
