@@ -3,9 +3,10 @@ module MCMonad.Main
     , launch
     , onHiddenWorkspace
     , shouldFollowIntoHidden
+    , pairBurst
     ) where
 
-import Control.Concurrent (myThreadId)
+import Control.Concurrent (myThreadId, threadDelay)
 import Control.Exception (finally, throwTo)
 import Control.Monad (forever, unless, void, when)
 import Data.IORef (IORef, newIORef, readIORef)
@@ -162,6 +163,8 @@ launch cfg = do
                        , windowMetadata = seededMetadata
                        , debugOverlays = False
                        , ignoredWindows = Set.empty
+                       , nativeFloats = Set.empty
+                       , nativeFloatRects = Map.empty
                        , lastSaveAt = Nothing
                        , timers = rsTimers restored
                        , nextTimerId = rsNextTimerId restored
@@ -422,7 +425,81 @@ eventLoop debug cfg hotkeyIdMap deferred = do
     mapM_ (userCodeDef () . handleEvent debug cfg hotkeyIdMap) deferred
     forever $ do
         evt <- withConnection $ \conn -> io $ readEvent conn
-        userCodeDef () $ handleEvent debug cfg hotkeyIdMap evt
+        dispatchFresh debug cfg hotkeyIdMap evt
+
+-- | How long to wait, after a 'WindowCreated' or 'WindowDestroyed' for
+-- a tracked pid, to see whether the complementary half of a same-pid
+-- pair is arriving right behind it (an app swapping a window's
+-- identity under the hood — observed both destroy-first and
+-- create-first) before treating the trigger on its own. Comfortably
+-- covers the single/low-double-digit millisecond gap observed between
+-- such a pair. Every other event is dispatched immediately as before.
+burstDrainDelayMicros :: Int
+burstDrainDelayMicros = 30000
+
+-- | The pid a create or destroy event belongs to, resolved against a
+-- single 'WindowSet' snapshot taken before anything in the current
+-- batch has been dispatched — valid for the trigger event and
+-- everything drained behind it alike, whichever type arrived first.
+eventPid :: W.StackSet String l WindowRef ScreenId ScreenDetail -> Event -> Maybe Int32
+eventPid _  (WindowCreated wi)  = Just (wiPid wi)
+eventPid ws (WindowDestroyed w) = wrPid <$> findByWindowId w (W.allWindows ws)
+eventPid _  _                   = Nothing
+
+-- | Entry point for a just-read event, before ordinary dispatch. A
+-- 'WindowCreated' or 'WindowDestroyed' for a resolvable pid gets a
+-- chance to pair with the complementary half of the same pid's burst
+-- — whichever of the two arrives first — and collapse into one
+-- relayout instead of two; everything else (and a trigger that
+-- doesn't pair) goes through 'handleEvent' exactly as before.
+dispatchFresh :: Bool -> MConfig Layout -> Map.Map Int (M ()) -> Event -> M ()
+dispatchFresh debug cfg hotkeyIdMap evt = do
+    rest <- tryCollapseBurst evt
+    mapM_ (userCodeDef () . handleEvent debug cfg hotkeyIdMap) rest
+
+-- | Look for a pairing for 'evt' and, if found, act on it directly via
+-- 'handleManagedReplacement'. Returns the events that still need
+-- ordinary dispatch: empty when a pairing fully handled things, or
+-- 'evt' plus everything drained while looking for one (in original
+-- order) when nothing paired — including when 'evt' itself has no
+-- resolvable pid, in which case nothing is drained at all.
+tryCollapseBurst :: Event -> M [Event]
+tryCollapseBurst evt = do
+    ws <- gets windowset
+    case eventPid ws evt of
+        Nothing  -> return [evt]
+        Just pid -> do
+            batch <- withConnection $ \conn -> io $ do
+                threadDelay burstDrainDelayMicros
+                drainReadyEvents conn
+            case pairBurst ws pid (evt : batch) of
+                Just (oldRef, winfo, leftover) -> do
+                    userCodeDef () $ handleManagedReplacement oldRef winfo
+                    return leftover
+                Nothing -> return (evt : batch)
+
+-- | Pair up a same-pid burst. Given the pid and the trigger followed by
+-- everything drained behind it, returns the old window and the new
+-- window's info when exactly one create and one destroy for that pid are
+-- present and the destroyed window is known, together with the events
+-- not consumed by the pairing.
+pairBurst :: W.StackSet String l WindowRef ScreenId ScreenDetail -> Int32 -> [Event] -> Maybe (WindowRef, WindowInfo, [Event])
+pairBurst ws pid events =
+    case (creates, destroys) of
+        ([WindowCreated winfo], [WindowDestroyed wid]) -> do
+            oldRef <- findByWindowId wid (W.allWindows ws)
+            return (oldRef, winfo, filter (not . isPaired) events)
+        _ -> Nothing
+  where
+    isCreateForPid e = case e of
+        WindowCreated wi -> wiPid wi == pid
+        _                -> False
+    isDestroyForPid e = case e of
+        WindowDestroyed{} -> eventPid ws e == Just pid
+        _                 -> False
+    isPaired e = isCreateForPid e || isDestroyForPid e
+    creates  = filter isCreateForPid events
+    destroys = filter isDestroyForPid events
 
 -- | Whether a window is managed but on no screen, i.e. it sits on a hidden
 -- workspace.

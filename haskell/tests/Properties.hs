@@ -10,8 +10,8 @@ import MCMonad.Core
     , withinSettleWindow, consumeIntent
     , PendingWindow(..), Timer(..), LayoutClass(..)
     )
-import MCMonad.IPC (WindowInfo(..), Command(..), OverlayScreenEntry(..), OverlayIgnoredWindow(..), parseIgnoredFact)
-import MCMonad.Main (onHiddenWorkspace, shouldFollowIntoHidden)
+import MCMonad.IPC (WindowInfo(..), Command(..), Event(..), OverlayScreenEntry(..), OverlayIgnoredWindow(..), parseIgnoredFact)
+import MCMonad.Main (onHiddenWorkspace, shouldFollowIntoHidden, pairBurst)
 import MCMonad.Affinity
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -26,6 +26,7 @@ import MCMonad.Operations
     , chooseOriginTag, pruneReclaims, reclaimOriginTTL, reclaimOriginCap
     , placeManaged, windowsToPark
     , attributeIgnoredWindows
+    , replaceWindowIdentity
     )
 import MCMonad.Sway (viewOnScreen)
 import MCMonad.Layout (Full(..))
@@ -1313,6 +1314,71 @@ prop_pruneReclaims_keeps_fresh ws =
   where
     m = mkReclaims [ (w, 0) | w <- ws ]
 
+-- === Destroy/create burst coalescing: in-place identity replace ===
+--
+-- replaceWindowIdentity rewrites one WindowRef to another everywhere it
+-- appears, in place, so a window that's inheriting another's position
+-- doesn't get reinserted at the top of the stack the way delete+insert
+-- would. These properties pin exactly that: identical shape, substituted
+-- identity, nothing else moved.
+
+prop_replaceWindowIdentity_noop_when_equal :: WindowRef -> TestStackSet -> Bool
+prop_replaceWindowIdentity_noop_when_equal w x =
+    replaceWindowIdentity w w x == x
+
+prop_replaceWindowIdentity_noop_when_absent :: WindowRef -> WindowRef -> TestStackSet -> Property
+prop_replaceWindowIdentity_noop_when_absent old new x =
+    not (W.member old x) ==> replaceWindowIdentity old new x == x
+
+-- | 'old' is drawn from the stack's own windows, not generated
+-- independently — 'WindowRef's Arbitrary range is wide enough that an
+-- independently-drawn 'old' almost never lands among a given
+-- 'TestStackSet's (narrower-range) windows, so a '==>' guard on
+-- membership would discard nearly every case instead of exercising it.
+withMember :: (WindowRef -> WindowRef -> TestStackSet -> Property) -> WindowRef -> TestStackSet -> Property
+withMember k new x =
+    not (null (W.allWindows x)) ==>
+        forAll (elements (W.allWindows x)) $ \old ->
+            old /= new && not (W.member new x) ==> k old new x
+
+prop_replaceWindowIdentity_invariant :: WindowRef -> TestStackSet -> Property
+prop_replaceWindowIdentity_invariant = withMember $ \old new x ->
+    property $ invariant (replaceWindowIdentity old new x)
+
+prop_replaceWindowIdentity_swaps_membership :: WindowRef -> TestStackSet -> Property
+prop_replaceWindowIdentity_swaps_membership = withMember $ \old new x ->
+    let x' = replaceWindowIdentity old new x
+    in property $ W.member new x' && not (W.member old x')
+
+prop_replaceWindowIdentity_preserves_count :: WindowRef -> TestStackSet -> Property
+prop_replaceWindowIdentity_preserves_count = withMember $ \old new x ->
+    property $ length (W.allWindows (replaceWindowIdentity old new x)) == length (W.allWindows x)
+
+-- | The real point of this function: every workspace's stack is
+-- substituted in place, not rebuilt — same positions, same up/down
+-- order, same focus, just with the old ref swapped for the new one.
+prop_replaceWindowIdentity_preserves_position :: WindowRef -> TestStackSet -> Property
+prop_replaceWindowIdentity_preserves_position = withMember $ \old new x ->
+    let x' = replaceWindowIdentity old new x
+    in stacksByTag x' === map (substStack old new) (stacksByTag x)
+  where
+    stacksByTag ss = [ (W.tag w, W.stack w) | w <- W.workspaces ss ]
+    substStack o n (tag, stk) = (tag, fmap (substWindows o n) stk)
+    substWindows o n stk = stk
+        { W.focus = sub o n (W.focus stk)
+        , W.up    = map (sub o n) (W.up stk)
+        , W.down  = map (sub o n) (W.down stk)
+        }
+    sub o n w = if w == o then n else w
+
+prop_replaceWindowIdentity_rekeys_floating :: WindowRef -> TestStackSet -> Property
+prop_replaceWindowIdentity_rekeys_floating = withMember $ \old new x ->
+    let rect = W.RationalRect 0.2 0.3 0.5 0.4
+        xFloat = x { W.floating = Map.insert old rect (W.floating x) }
+        x' = replaceWindowIdentity old new xFloat
+    in property $ Map.lookup new (W.floating x') == Just rect
+        && not (Map.member old (W.floating x'))
+
 -- Collect all properties
 
 -- === LAZY RESTORE: pending windows ===
@@ -1617,6 +1683,51 @@ prop_windowsToPark_changed_parks_both :: [WindowRef] -> [WindowRef] -> Bool
 prop_windowsToPark_changed_parks_both leaving orphaned =
     windowsToPark True leaving orphaned == leaving ++ orphaned
 
+-- Same-pid destroy/create bursts: one of each pairs, in either arrival order
+prop_pairBurst_pairs_either_order :: TestStackSet -> Property
+prop_pairBurst_pairs_either_order ss =
+    not (null (W.allWindows ss)) ==>
+    forAll (elements (W.allWindows ss)) $ \old ->
+        let pid = wrPid old
+            newId = wrWindowId old + 100000
+            created = WindowCreated (mkWindowInfo newId pid)
+            destroyed = WindowDestroyed (wrWindowId old)
+            summary = fmap (\(o, wi, rest) -> (o, wiWindowId wi, null rest))
+        in conjoin
+            [ summary (pairBurst ss pid [created, destroyed]) === Just (old, newId, True)
+            , summary (pairBurst ss pid [destroyed, created]) === Just (old, newId, True)
+            ]
+
+-- A pairing needs exactly one create and one destroy for the pid
+prop_pairBurst_needs_both_halves :: TestStackSet -> Property
+prop_pairBurst_needs_both_halves ss =
+    not (null (W.allWindows ss)) ==>
+    forAll (elements (W.allWindows ss)) $ \old ->
+        let pid = wrPid old
+            newId = wrWindowId old + 100000
+            created = WindowCreated (mkWindowInfo newId pid)
+            destroyed = WindowDestroyed (wrWindowId old)
+            other = WindowCreated (mkWindowInfo (newId + 1) pid)
+        in conjoin
+            [ isNothing (pairBurst ss pid [created])
+            , isNothing (pairBurst ss pid [destroyed])
+            , isNothing (pairBurst ss pid [created, other, destroyed])
+            ]
+
+-- Events not belonging to the pairing are handed back, untouched
+prop_pairBurst_keeps_unrelated_events :: TestStackSet -> Property
+prop_pairBurst_keeps_unrelated_events ss =
+    not (null (W.allWindows ss)) ==>
+    forAll (elements (W.allWindows ss)) $ \old ->
+        let pid = wrPid old
+            newId = wrWindowId old + 100000
+            created = WindowCreated (mkWindowInfo newId pid)
+            destroyed = WindowDestroyed (wrWindowId old)
+            unrelated = WindowCreated (mkWindowInfo (newId + 1) (pid + 1))
+        in case pairBurst ss pid [created, unrelated, destroyed] of
+            Just (_, _, [WindowCreated wi]) -> wiPid wi == pid + 1
+            _ -> False
+
 -- A focused window is routed to a hidden workspace exactly when it lives on one
 prop_onHiddenWorkspace_matches_hidden_stacks :: TestStackSet -> WindowRef -> Bool
 prop_onHiddenWorkspace_matches_hidden_stacks ss w =
@@ -1806,6 +1917,19 @@ allProperties =
 
     , ("parking: unchanged set parks only orphans",     property prop_windowsToPark_unchanged_parks_orphans)
     , ("parking: changed set parks leavers and orphans", property prop_windowsToPark_changed_parks_both)
+    -- Destroy/create burst coalescing: in-place identity replace
+    , ("replace identity: no-op when equal",          property prop_replaceWindowIdentity_noop_when_equal)
+    , ("replace identity: no-op when absent",         property prop_replaceWindowIdentity_noop_when_absent)
+    , ("replace identity: invariant",                 property prop_replaceWindowIdentity_invariant)
+    , ("replace identity: swaps membership",          property prop_replaceWindowIdentity_swaps_membership)
+    , ("replace identity: preserves window count",    property prop_replaceWindowIdentity_preserves_count)
+    , ("replace identity: preserves stack position",  property prop_replaceWindowIdentity_preserves_position)
+    , ("replace identity: rekeys floating entry",     property prop_replaceWindowIdentity_rekeys_floating)
+
+    , ("burst: destroy/create pair in either order",  property prop_pairBurst_pairs_either_order)
+    , ("burst: pairing needs both halves",            property prop_pairBurst_needs_both_halves)
+    , ("burst: unrelated events are kept",            property prop_pairBurst_keeps_unrelated_events)
+
     , ("focus: hidden-workspace window is routed",    property prop_onHiddenWorkspace_matches_hidden_stacks)
     , ("focus: hidden-workspace follow requires frontmost app", property prop_shouldFollowIntoHidden_requires_both)
 

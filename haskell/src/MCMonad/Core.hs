@@ -468,12 +468,34 @@ data MState = MState
       -- present in 'windowMetadata' but deliberately absent from
       -- 'windowset', since mcmonad never positions or tracks them.
       -- Tracked separately so a query for "what's on this screen" (e.g.
-      -- AltTab's per-screen filter) can still attribute them to whichever
-      -- screen they physically sit on — mcmonad-core resolves their live
-      -- AX frame on demand, since this state only ever carries identity.
-      -- Added in 'MCMonad.Operations.manage' \/ 'manageSilent' when the
-      -- post-hook 'windowset' doesn't contain the window; removed in
-      -- 'MCMonad.Operations.unmanage'.
+      -- a window switcher's per-screen filter) can still attribute them
+      -- to whichever screen they physically sit on — mcmonad-core
+      -- resolves their live AX frame on demand, since this state only
+      -- ever carries identity. Added in 'MCMonad.Operations.manage' \/
+      -- 'manageSilent' when the post-hook 'windowset' doesn't contain the
+      -- window; removed in 'MCMonad.Operations.unmanage'.
+    , nativeFloats     :: !(Set WindowRef)
+      -- ^ Windows placed via 'MCMonad.ManageHook.doFloatNative': real
+      -- 'windowset' \/ @W.floating@ members (so they get a home workspace
+      -- and park \/ show with it like any other managed window), but
+      -- 'MCMonad.Operations.resolveFloating' skips them when building
+      -- frame assignments, so mcmonad never writes a position or size for
+      -- one — unlike plain 'MCMonad.ManageHook.doFloat', which does.
+      -- Added by 'doFloatNative' itself; removed in
+      -- 'MCMonad.Operations.unmanage' alongside the normal
+      -- membership-gated cleanup, since these are ordinary members.
+    , nativeFloatRects :: !(Map.Map WindowRef Rectangle)
+      -- ^ Last known on-screen frame of each 'nativeFloats' window. Seeded
+      -- from 'MCMonad.IPC.wiFrame' when 'MCMonad.ManageHook.doFloatNative'
+      -- first manages it, then kept current from live
+      -- 'MCMonad.IPC.WindowFrameChanged' events while the window is mapped.
+      -- 'MCMonad.Operations.windows' never writes a frame for a native
+      -- float, so when one parks and later un-parks, the daemon's
+      -- \"ShowWindows\" is a no-op by design (it relies on the SetFrames
+      -- that normally follows) -- this cache is what that one-time restore
+      -- is sent from, instead of leaving the window stuck at the park
+      -- corner. Removed in 'MCMonad.Operations.unmanage' alongside
+      -- 'nativeFloats'.
     , lastSaveAt       :: !(Maybe UTCTime)
       -- ^ Wall clock of the most recent 'MCMonad.Operations.saveStateIO'
       -- call. The 'windows' transition skips its post-mutation save when

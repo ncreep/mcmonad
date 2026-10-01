@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module MCMonad.IPC
     ( -- * Connection
@@ -9,6 +10,7 @@ module MCMonad.IPC
       -- * Sending and receiving
     , sendCommand
     , readEvent
+    , drainReadyEvents
       -- * Command types (Haskell -> Swift)
     , Command(..)
     , FrameAssignment(..)
@@ -46,7 +48,7 @@ import GHC.Generics (Generic)
 import Network.Socket
 import System.Directory (getHomeDirectory)
 import System.FilePath ((</>))
-import System.IO (hSetBuffering, BufferMode(..), hFlush, hPutStrLn, IOMode(..), stderr)
+import System.IO (hSetBuffering, BufferMode(..), hFlush, hPutStrLn, hReady, IOMode(..), stderr)
 
 import MCMonad.Core (Connection(..), Rectangle(..), WindowMetadata(..), Timer(..), ScreenRole, parseRole)
 
@@ -548,4 +550,25 @@ readEvent conn = do
         Left err  -> fail $ "Failed to decode event: " ++ err
                             ++ "\nRaw: " ++ show line
         Right evt -> return evt
+
+-- | 'readEvent', but non-blocking: returns 'Nothing' instead of waiting
+-- when no complete line is buffered yet. 'hReady' can throw on a closed
+-- handle; treated the same as "nothing ready" since the caller's normal
+-- blocking read will surface the real connection error next.
+tryReadEvent :: Connection -> IO (Maybe Event)
+tryReadEvent conn = do
+    ready <- hReady (connHandle conn) `catch` \(_ :: IOException) -> return False
+    if ready then Just <$> readEvent conn else return Nothing
+
+-- | Drain every event already buffered on the socket, without blocking.
+-- Used to see what, if anything, arrived right behind an event worth
+-- pairing with its neighbours before acting on either.
+drainReadyEvents :: Connection -> IO [Event]
+drainReadyEvents conn = go []
+  where
+    go acc = do
+        mEvt <- tryReadEvent conn
+        case mEvt of
+            Just evt -> go (evt : acc)
+            Nothing  -> return (reverse acc)
 

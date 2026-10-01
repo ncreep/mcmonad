@@ -15,6 +15,8 @@ module MCMonad.Operations
     , restorePending
     , forgetPending
     , unmanage
+    , replaceWindowIdentity
+    , handleManagedReplacement
     , unmanagedOriginTTL
     , reclaimOriginTTL
     , reclaimOriginCap
@@ -953,6 +955,62 @@ unmanage w = do
         -- the leaked entries accumulated in mcmonad.state by the
         -- hundreds before this used the full delete.
         windows (W.delete w)
+
+-- | Replace every occurrence of one window with another across every
+-- workspace, preserving exact stack position and floating geometry —
+-- unlike removing and reinserting, which loses position. The two refs
+-- are taken as a given correspondence; this does not look for or
+-- validate one itself.
+replaceWindowIdentity
+    :: Ord a => a -> a
+    -> W.StackSet String l a ScreenId ScreenDetail
+    -> W.StackSet String l a ScreenId ScreenDetail
+replaceWindowIdentity old new ws
+    | old == new = ws
+    | otherwise = (W.mapWorkspace replaceInWorkspace ws)
+        { W.floating = case M.lookup old (W.floating ws) of
+            Just rect -> M.insert new rect (M.delete old (W.floating ws))
+            Nothing   -> W.floating ws
+        }
+  where
+    replaceInWorkspace wsp = wsp { W.stack = fmap replaceInStack (W.stack wsp) }
+    replaceInStack stk = stk
+        { W.focus = sub (W.focus stk)
+        , W.up    = map sub (W.up stk)
+        , W.down  = map sub (W.down stk)
+        }
+    sub w = if w == old then new else w
+
+-- | Collapse a destroy immediately followed by a create for the same
+-- process into one state transition and one relayout, instead of the
+-- destroy's removal and the create's insertion each pushing their own
+-- layout pass — visible otherwise as the tiles briefly reflowing twice
+-- in a row. Only called once the caller has already confirmed exactly
+-- one destroy and one create for this pid arrived together; this does
+-- not establish that correspondence itself, only acts on it.
+--
+-- Skips the manage hook: the window is inheriting the old window's
+-- placement, which already went through the hook once.
+handleManagedReplacement :: WindowRef -> WindowInfo -> M ()
+handleManagedReplacement old winfo = do
+    ws <- gets windowset
+    when (W.member old ws) $ do
+        let new = WindowRef (wiWindowId winfo) (wiPid winfo)
+        modify $ \s -> s
+            { sticky = if S.member old (sticky s)
+                           then S.insert new (S.delete old (sticky s))
+                           else sticky s
+            , nativeFloats = if S.member old (nativeFloats s)
+                           then S.insert new (S.delete old (nativeFloats s))
+                           else nativeFloats s
+            , nativeFloatRects = case M.lookup old (nativeFloatRects s) of
+                Just r  -> M.insert new r (M.delete old (nativeFloatRects s))
+                Nothing -> nativeFloatRects s
+            , scratchpads = M.map (\w -> if w == old then new else w) (scratchpads s)
+            , windowMetadata = M.insert new (metadataFromInfo winfo)
+                                   (M.delete old (windowMetadata s))
+            }
+        windows (replaceWindowIdentity old new)
 
 -- ---------------------------------------------------------------------------
 -- Layout messages
