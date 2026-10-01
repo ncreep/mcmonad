@@ -856,7 +856,7 @@ defaultFocusBudget = 4
 -- re-verify uses 500ms) while staying short enough that a deliberate
 -- keyboard app-switch a beat later is treated as genuine intent.
 settleGrace :: NominalDiffTime
-settleGrace = 1.0
+settleGrace = 0.6
 
 -- | Build a fresh intent from the focus 'MCMonad.Operations.windows'
 -- just committed, plus the set of windows it wrote frames for (for

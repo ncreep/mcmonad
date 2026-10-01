@@ -718,10 +718,16 @@ handleFocusedWindowChanged wid pid = do
             -- clear the intent.
             applyAndClearIntent
         Just i | Just _ <- fiTarget i ->
-            -- Cross-app divergence: bounce or spurious AX event from a
-            -- third app. mcmonad's view stands; push macOS back to the
-            -- target and decrement the budget.
-            pushBackFocus i
+            -- Cross-app divergence: a different app's window reported
+            -- focus while mcmonad still had a specific target armed.
+            -- This used to push macOS back onto the target, treating
+            -- any divergence as a bounce. But the same event also
+            -- covers a legitimate user switch (window switching, link
+            -- following) to a window mcmonad has on a hidden workspace,
+            -- which the Swift side couldn't route as menuFocusWindow
+            -- due to a stale snapshot. There's no reliable way to tell
+            -- the two apart here, so follow it rather than fight it.
+            applyAndClearIntent
         Just _ ->
             -- Target-less intent (the user is deliberately viewing an
             -- empty workspace) and the event is neither a settling echo
@@ -734,16 +740,21 @@ handleFocusedWindowChanged wid pid = do
             -- No intent armed. AX is authoritative.
             applyClean
   where
-    -- No 'windows' call: every candidate 'resolveFocusedWindow' can
-    -- return is already displayed, on this screen or a secondary one,
-    -- so nothing needs laying out or re-parking. What *can* change is
-    -- which screen is current — hence the explicit save.
+    -- Every candidate 'resolveFocusedWindow' can return is already
+    -- displayed and just needs its focus (and, for a focus-dependent
+    -- layout, its frame) brought in line, so this always goes through
+    -- 'windows'. If the window isn't visible at all, fall back to
+    -- checking all workspaces (including hidden ones): this handles
+    -- focus events from window switching or link following that
+    -- target a hidden-workspace window when Swift Core's cachedSnapshot
+    -- was nil or stale.
     applyClean = do
         ws <- gets windowset
-        whenJust (resolveFocusedWindow wid pid ws) $ \ws' -> do
-            modify $ \s -> s { windowset = ws' }
-            pushOverlaySnapshot
-            maybeSaveState
+        case resolveFocusedWindow wid pid ws of
+            Just ws' -> windows (const ws')
+            Nothing -> do
+                let wr = WindowRef wid pid
+                when (W.member wr ws) $ windows (W.focusWindow wr)
     applyAndClearIntent = do
         modify $ \s -> s { focusIntent = Nothing }
         applyClean
@@ -763,12 +774,8 @@ handleFrontAppChanged pid = do
             -- without spending the budget (see 'handleFocusedWindowChanged').
             -- Time-bounded, so a real Cmd-Tab later still follows.
             return ()
-        Just i | Just _ <- fiTarget i ->
-            -- Different app activated — bounce or spurious. Push back.
-            pushBackFocus i
         Just _ -> do
-            -- Target-less intent past its settle window: nothing to
-            -- re-assert; the event is genuine. Follow it.
+            -- No longer checking for a target: follow any app switch as user intent.
             modify $ \s -> s { focusIntent = Nothing }
             applyClean
         Nothing ->
@@ -776,23 +783,21 @@ handleFrontAppChanged pid = do
   where
     applyClean = do
         ws <- gets windowset
-        whenJust (resolveFrontApp pid ws) $ \ws' -> do
-            modify $ \s -> s { windowset = ws' }
-            pushOverlaySnapshot
-            maybeSaveState
-
--- | An event arrived that contradicts our 'FocusIntent'. macOS' focus
--- has drifted from where mcmonad put it; push focus back onto the
--- intended target by re-issuing the 'FocusWindow' IPC, and decrement
--- the budget so a pathological loop self-terminates.
-pushBackFocus :: FocusIntent -> M ()
-pushBackFocus i = do
-    conn <- asks connection
-    -- Target-less intents never reach here (the handlers follow instead
-    -- of pushing back — there is nothing to re-assert), but stay total.
-    whenJust (fiTarget i) $ \t ->
-        io $ sendCommand conn (FocusWindow (wrWindowId t) (wrPid t))
-    modify $ \s -> s { focusIntent = consumeIntent i }
+        case resolveFrontApp pid ws of
+            Just ws' ->
+                -- Must go through 'windows', not a bare 'modify': for a
+                -- focus-dependent layout (e.g. 'Full'), which window
+                -- gets a rect depends on which one is focused, so a
+                -- pure state update leaves frames stale.
+                windows (const ws')
+            Nothing ->
+                -- The app has no visible window at all - it may still
+                -- have one on a hidden workspace (this is the only
+                -- signal we get for apps whose AX focus notifications
+                -- don't fire reliably). 'windows' brings that
+                -- workspace on screen if so.
+                whenJust (find (\w -> wrPid w == pid) (W.allWindows ws)) $
+                    windows . W.focusWindow
 
 -- ---------------------------------------------------------------------------
 -- Helpers

@@ -723,7 +723,7 @@ prop_isSettlingPidEcho_matches_and_rejects w otherPid =
 -- The settle window is what makes echo-suppression safe: a set member is
 -- suppressible at arming time, but NOT once the grace has elapsed — past
 -- the deadline the same window's event is a genuine later user switch and
--- must be free to move the current screen. (settleGrace is 1s.)
+-- must be free to move the current screen. (settleGrace is 0.6s.)
 prop_settle_window_bounds_suppression :: WindowRef -> Property
 prop_settle_window_bounds_suppression w =
     case armingIntent originBase (Set.singleton w) (Just w) of
@@ -731,6 +731,18 @@ prop_settle_window_bounds_suppression w =
         Just i  -> property $
             withinSettleWindow originBase i
             && not (withinSettleWindow (addUTCTime 2 originBase) i)
+
+-- settleGrace exists to cover the real macOS AX-settle burst (per
+-- CommandExecutor.swift's own DEFIED re-verify, ~500ms), not just an
+-- instant. An echo arriving comfortably inside that burst (0.4s in) must
+-- still read as suppressible, or a multi-screen layout pass — whose
+-- settling echoes take longer to all arrive — starts leaking late echoes
+-- through as spurious "genuine" focus switches.
+prop_settle_window_covers_real_burst :: WindowRef -> Property
+prop_settle_window_covers_real_burst w =
+    case armingIntent originBase (Set.singleton w) (Just w) of
+        Nothing -> property False
+        Just i  -> property $ withinSettleWindow (addUTCTime 0.4 originBase) i
 
 
 -- === PERSISTENCE ROUND-TRIP (MCMonad.Persistence) ===
@@ -1668,6 +1680,7 @@ allProperties =
     , ("settling echo rejects an outsider window",     property prop_isSettlingEcho_rejects_outsider)
     , ("settling pid-echo matches and rejects",        property prop_isSettlingPidEcho_matches_and_rejects)
     , ("settle window bounds echo suppression",        property prop_settle_window_bounds_suppression)
+    , ("settle window covers the real macOS burst",    property prop_settle_window_covers_real_burst)
     -- Cross-restart identity matcher
     -- Persistence round-trip (WindowRef identity)
     , ("persistence: kept saved survives, stale dropped", property prop_persistence_round_trip)

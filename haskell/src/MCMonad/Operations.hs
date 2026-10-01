@@ -250,6 +250,25 @@ windows f = do
                                 } }
                         return rects
 
+    -- 4b. A layout can leave some stack members without a rect (e.g.
+    --     'Full' only lays out the focused window). Step 2's 'toHide'
+    --     won't catch those: it only tracks workspace-level visibility,
+    --     not per-window layout coverage. Left alone, such a window
+    --     just keeps its last frame — a stale ghost that can surface
+    --     on screen behind whatever's focused now. Park any such
+    --     window every pass, same as hidden-workspace windows. Not
+    --     gated on 'visibleChanged' (unlike step 2): who's orphaned can
+    --     change on every focus move even with the visible set
+    --     unchanged, and re-parking an already-parked window is a
+    --     cheap no-op on the daemon side.
+    let laidOutWindows = S.fromList (map fst allRects)
+        orphaned = filter (\w -> w `elem` newVisible
+                              && not (S.member w laidOutWindows)
+                              && not (M.member w (W.floating currentAfterSticky)))
+                          (allManagedWindows currentAfterSticky)
+    unless (null orphaned) $
+        io $ sendCommand conn (HideWindows (map wrWindowId orphaned))
+
     -- 5. Resolve floating window positions
     currentWS <- gets windowset
     let floatRects = resolveFloating currentWS
@@ -286,7 +305,7 @@ windows f = do
     -- The timestamp bounds how long those echoes are believed to be ours.
     nowArm <- io getCurrentTime
     modify $ \s -> s
-        { focusIntent = armingIntent nowArm (S.fromList newVisible) newFocus }
+        { focusIntent = armingIntent nowArm (S.fromList newVisible `S.union` S.fromList toHide) newFocus }
 
     -- 8. Send workspace indicator update (with mode indicator)
     mode <- gets inputMode
