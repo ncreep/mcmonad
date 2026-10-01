@@ -19,6 +19,7 @@ enum LauncherLogicChecks {
         checkRecency()
         checkOverlayScreenWire()
         checkWorkspaceWindowLookup()
+        checkParkGeometry()
         print("Launcher logic checks passed")
     }
 
@@ -275,5 +276,43 @@ enum LauncherLogicChecks {
         precondition(WorkspaceWindowLookup.windowIds(forScreenFrame: left, in: nil, ignoredWindowIds: { _ in [] }) == [])
         let empty = OverlaySnapshot(debugOverlays: false, screens: [], hiddenWorkspaces: [], ignoredWindows: [])
         precondition(WorkspaceWindowLookup.windowIds(forScreenFrame: left, in: empty, ignoredWindowIds: { _ in [] }) == [])
+    }
+
+    // MARK: Parking geometry
+
+    static func checkParkGeometry() {
+        func info(_ id: Int, _ frame: CGRect) -> ScreenInfo {
+            ScreenInfo(screenId: id, frame: frame, uuid: "u\(id)", name: "s\(id)", role: .primary)
+        }
+        let size = CGSize(width: 400, height: 300)
+        let left = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let right = CGRect(x: 1000, y: 0, width: 1000, height: 800)
+        let pair = [info(0, left), info(1, right)]
+
+        // alone: the bottom-right corner is free
+        let solo = [info(0, left)]
+        precondition(freeCorner(for: left, among: solo, windowSize: size) == (CGPoint(x: 999, y: 799), size))
+
+        // beside another screen: the bottom-right corner would spill onto it,
+        // so the window parks off the left edge instead
+        precondition(freeCorner(for: left, among: pair, windowSize: size) == (CGPoint(x: -399, y: 799), size))
+        precondition(freeCorner(for: right, among: pair, windowSize: size) == (CGPoint(x: 1999, y: 799), size))
+
+        // whatever freeCorner picks reads as parked, and a flush tile does not
+        let (origin, parkSize) = freeCorner(for: left, among: pair, windowSize: size)
+        precondition(isAlreadyParked(CGRect(origin: origin, size: parkSize), screens: pair))
+        precondition(!isAlreadyParked(CGRect(x: 0, y: 0, width: 500, height: 800), screens: pair), "half tile is not parked")
+        precondition(!isAlreadyParked(left, screens: pair), "full screen is not parked")
+
+        // boxed in on all four sides: falls back to a 2x2 sliver
+        let center = CGRect(x: 1000, y: 800, width: 1000, height: 800)
+        let boxed = [
+            info(0, center),
+            info(1, CGRect(x: 0, y: 800, width: 1000, height: 800)),
+            info(2, CGRect(x: 2000, y: 800, width: 1000, height: 800)),
+            info(3, CGRect(x: 1000, y: 0, width: 1000, height: 800)),
+            info(4, CGRect(x: 1000, y: 1600, width: 1000, height: 800)),
+        ]
+        precondition(freeCorner(for: center, among: boxed, windowSize: size).1 == CGSize(width: 2, height: 2))
     }
 }

@@ -171,6 +171,16 @@ final class EventBridge: SkyLightEventDelegate {
         }
     }
 
+    /// A destroy/close is only spurious if the window still exists AND its
+    /// owning app still lists it via AX — `windowExists` alone can stay
+    /// true for a window an app has already swapped out internally,
+    /// leaving a dead id as a phantom layout slot for seconds otherwise.
+    private func isSpuriousDestroy(_ windowId: UInt32, stillExists: Bool) -> Bool {
+        guard stillExists else { return false }
+        guard let pid = windowIdToPid[windowId] else { return false }
+        return AXWindowService.findAXWindow(windowId: windowId, pid: pid) != nil
+    }
+
     /// Retract a managed window from the brain and clear its bookkeeping.
     private func retire(_ wid: UInt32, reason: String) {
         let pid = windowIdToPid[wid].map { String($0) } ?? "-"
@@ -272,7 +282,21 @@ final class EventBridge: SkyLightEventDelegate {
             }
 
         case .destroyed(let windowId, let spaceId):
-            fputs("DEBUG: skyLightEvent .destroyed wid=\(windowId) spaceId=\(spaceId) wasManaged=\(managedWindowIds.contains(windowId)) stillExists=\(SkyLightQuery.windowExists(windowId))\n", stderr)
+            let stillExists = SkyLightQuery.windowExists(windowId)
+            fputs("DEBUG: skyLightEvent .destroyed wid=\(windowId) spaceId=\(spaceId) wasManaged=\(managedWindowIds.contains(windowId)) stillExists=\(stillExists)\n", stderr)
+            // A destroy notification can be spurious — SkyLight fires one
+            // for a window that's still alive, most commonly around a
+            // cross-screen AX move. Trusting it blindly means unmanaging a
+            // live window and telling the brain it's gone, which the
+            // reconcile sweep then "fixes" a couple seconds later by
+            // re-adopting it as brand new — sending it through the manage
+            // hook and a full layout pass again, which is what actually
+            // causes focus to jump. Verify liveness first, the same way
+            // `validateWindows` already does for its own check.
+            guard !isSpuriousDestroy(windowId, stillExists: stillExists) else {
+                fputs("DEBUG: skyLightEvent .destroyed wid=\(windowId) ignored (spurious, still exists)\n", stderr)
+                break
+            }
             removeManagedWindow(windowId: windowId)
             rejectedWindowIds.removeValue(forKey: windowId)
             ineligibleStreak.removeValue(forKey: windowId)
@@ -280,7 +304,12 @@ final class EventBridge: SkyLightEventDelegate {
             socketServer.send(.windowDestroyed(windowId: windowId))
 
         case .closed(let windowId):
-            fputs("DEBUG: skyLightEvent .closed wid=\(windowId) wasManaged=\(managedWindowIds.contains(windowId)) stillExists=\(SkyLightQuery.windowExists(windowId))\n", stderr)
+            let stillExists = SkyLightQuery.windowExists(windowId)
+            fputs("DEBUG: skyLightEvent .closed wid=\(windowId) wasManaged=\(managedWindowIds.contains(windowId)) stillExists=\(stillExists)\n", stderr)
+            guard !isSpuriousDestroy(windowId, stillExists: stillExists) else {
+                fputs("DEBUG: skyLightEvent .closed wid=\(windowId) ignored (spurious, still exists)\n", stderr)
+                break
+            }
             removeManagedWindow(windowId: windowId)
             rejectedWindowIds.removeValue(forKey: windowId)
             ineligibleStreak.removeValue(forKey: windowId)

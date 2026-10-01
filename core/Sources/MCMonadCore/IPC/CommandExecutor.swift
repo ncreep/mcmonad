@@ -409,15 +409,26 @@ final class CommandExecutor {
 
         let allScreens = displayManager.currentScreens()
 
-        // Park each window 1px inside the bottom-right corner of the screen it
-        // is on, leaving only a ~1px sliver visible. The origin MUST stay
-        // inside the display union: a window placed *fully* off-screen gets
-        // yanked back on-screen by AppKit (a titled NSWindow "automatically
-        // constrains itself to the screen") — that was the "Photoshop ghost on
-        // an empty workspace" bug, caused by the old `screenMaxX + 100` target.
-        // The surviving sliver doubles as a manual drag-handle if the daemon
-        // dies. Mirrors AeroSpace's hideInCorner. SkyLight can't move other
-        // apps' windows (permission); AX can, since we hold Accessibility.
+        // Park each window 1px inside a corner of the screen it is on,
+        // leaving only a ~1px sliver visible. The origin MUST stay inside
+        // the display union: a window placed *fully* off-screen gets yanked
+        // back on-screen by AppKit (a titled NSWindow "automatically
+        // constrains itself to the screen") — that was the "Photoshop ghost
+        // on an empty workspace" bug, caused by the old `screenMaxX + 100`
+        // target. The surviving sliver doubles as a manual drag-handle if
+        // the daemon dies. Mirrors AeroSpace's hideInCorner. SkyLight can't
+        // move other apps' windows (permission); AX can, since we hold
+        // Accessibility.
+        //
+        // Which corner is picked is computed fresh every call (screens can
+        // be connected/disconnected at any time): a window keeps its full
+        // size while parked, so hanging it off an edge that another screen
+        // sits against would spill the window's entire body onto that
+        // neighbour — still fully covering its real content, and not
+        // actually hidden. `freeCorner` picks an edge with nothing beyond
+        // it, independently per axis, falling back to shrinking the parked
+        // size (rather than picking an edge that spills) only when a
+        // screen's arrangement leaves no free edge at all (e.g. a 2x2 grid).
         for wid in windowIds {
             guard let snap = SkyLightQuery.queryWindow(wid) else {
                 FrameLog.emit(source: .cmdHideMove, windowId: wid, result: "no-snap")
@@ -428,31 +439,22 @@ final class CommandExecutor {
                               result: "no-screen")
                 continue
             }
-            let corner = CGPoint(x: screen.frame.maxX - 1, y: screen.frame.maxY - 1)
-            // Already parked: x pinned at a corner (macOS' titlebar clamp
-            // only pulls y back, so x is the discriminator). Skip the AX
-            // write — this makes hide re-assertion idempotent-cheap, and the
-            // brain leans on that by re-sending the full park list on every
-            // front-app change / drift report to heal the silent bulk
-            // un-park macOS performs on hidden windows during fullscreen
-            // Space transitions. Checked against EVERY screen's right edge,
-            // not the resolved `screen`: a parked frame hangs almost
-            // entirely off its own display, so on multi-monitor setups
-            // `screen(forFrame:)` resolves the neighbour and a
-            // single-screen check would re-park (and slowly migrate) the
-            // window on every re-assert.
-            //
-            // The right-edge test alone is NOT sufficient: on a horizontal
-            // multi-monitor layout the right screen's minX equals the left
-            // screen's maxX, so every ordinary window tiled on the right
-            // display sits at x >= (left screen's maxX) - 2 and would be
-            // mistaken for parked — leaving the second monitor's windows
-            // permanently unhideable. Pair it with the sliver test: a truly
-            // parked window shows at most a ~1px column on any display.
+            let (corner, size) = freeCorner(for: screen.frame, among: allScreens,
+                                             windowSize: snap.frame.size)
+            // Already parked: skip the AX write — this makes hide
+            // re-assertion idempotent-cheap, and the brain leans on that by
+            // re-sending the full park list on every front-app change /
+            // drift report to heal the silent bulk un-park macOS performs
+            // on hidden windows during fullscreen Space transitions.
+            // Checked against every screen, not just the resolved `screen`:
+            // a parked frame hangs almost entirely off its own display, so
+            // on multi-monitor setups `screen(forFrame:)` resolves the
+            // neighbour and a single-screen check would re-park (and
+            // slowly migrate) the window on every re-assert.
             if isAlreadyParked(snap.frame, screens: allScreens) {
                 continue
             }
-            let target = CGRect(origin: corner, size: snap.frame.size)
+            let target = CGRect(origin: corner, size: size)
             FrameLog.emit(source: .cmdHideMove,
                           windowId: wid, pid: snap.pid, rect: target,
                           tHash: TitleHash.hash(windowId: wid, pid: snap.pid),
@@ -475,23 +477,4 @@ final class CommandExecutor {
         fputs("CMD: show-windows ids=\(windowIds)\n", stderr)
         // SetFrames follows immediately and repositions windows correctly.
     }
-}
-
-/// Is this frame already parked in some screen's bottom-right corner?
-///
-/// Two conditions, both required. The origin must be pinned at a screen's
-/// right edge (parks set x = maxX - 1; macOS' titlebar clamp only pulls y
-/// back on-screen, so x survives), AND the frame must show no more than a
-/// sliver on any display. The second half is what keeps adjacent monitors
-/// apart: on a side-by-side layout the right display's minX *is* the left
-/// display's maxX, so an ordinary window tiled at the right screen's left
-/// edge passes the edge test while still being fully visible.
-func isAlreadyParked(_ frame: CGRect, screens: [ScreenInfo]) -> Bool {
-    let atRightEdge = screens.contains { frame.origin.x >= $0.frame.maxX - 2 }
-    guard atRightEdge else { return false }
-    let widestExposure = screens
-        .map { $0.frame.intersection(frame) }
-        .map { $0.isNull ? 0 : $0.width }
-        .max() ?? 0
-    return widestExposure <= 2
 }
