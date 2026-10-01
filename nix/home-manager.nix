@@ -3,7 +3,7 @@ flake: { config, lib, pkgs, ... }:
 let
   cfg = config.services.mcmonad;
   flakePkgs = flake.packages.${pkgs.stdenv.hostPlatform.system};
-  app = flakePkgs.mcmonad-app;
+  app = cfg.package;
   homeDir = config.home.homeDirectory;
   # macOS TCC keys Accessibility entries by binary path + cdhash. Launching
   # directly from /nix/store/<hash>/... accumulates orphan rows in System
@@ -54,6 +54,8 @@ in
       '';
       example = "Apple Development: you@example.com (TEAMID)";
     };
+
+    package = lib.mkPackageOption flakePkgs "mcmonad-app" { };
   };
 
   config = lib.mkIf cfg.enable {
