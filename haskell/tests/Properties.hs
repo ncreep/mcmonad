@@ -8,9 +8,10 @@ import MCMonad.Core
     , FocusIntent(..), armingIntent, isFocusIntentTarget
     , isIntentTargetPid, isSettlingEcho, isSettlingPidEcho
     , withinSettleWindow, consumeIntent
-    , PendingWindow(..), Timer(..)
+    , PendingWindow(..), Timer(..), LayoutClass(..)
     )
 import MCMonad.IPC (WindowInfo(..), Command(..))
+import MCMonad.Main (onHiddenWorkspace, shouldFollowIntoHidden)
 import MCMonad.Affinity
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -24,6 +25,7 @@ import MCMonad.Operations
     , chooseOriginTag, pruneReclaims, reclaimOriginTTL, reclaimOriginCap
     )
 import MCMonad.Sway (viewOnScreen)
+import MCMonad.Layout (Full(..))
 import qualified Data.List as L
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -1556,6 +1558,21 @@ prop_role_names_round_trip =
     all (\r -> parseRole (roleName r) == Just r) [minBound .. maxBound]
     && parseRole "left" == Nothing
 
+-- Full layout: only the focused window gets a rect
+prop_fullLayout_places_only_focused :: WindowRef -> [WindowRef] -> [WindowRef] -> ScreenDetail -> Bool
+prop_fullLayout_places_only_focused f up down (SD r) =
+    pureLayout Full r (W.Stack f up down) == [(f, r)]
+
+-- A focused window is routed to a hidden workspace exactly when it lives on one
+prop_onHiddenWorkspace_matches_hidden_stacks :: TestStackSet -> WindowRef -> Bool
+prop_onHiddenWorkspace_matches_hidden_stacks ss w =
+    onHiddenWorkspace ss w == (w `elem` concatMap (W.integrate' . W.stack) (W.hidden ss))
+
+-- A hidden-workspace focus event is followed only when its app is also frontmost
+prop_shouldFollowIntoHidden_requires_both :: Bool -> Bool -> Bool
+prop_shouldFollowIntoHidden_requires_both onHidden isFrontmostApp =
+    shouldFollowIntoHidden onHidden isFrontmostApp == (onHidden && isFrontmostApp)
+
 allProperties :: [(String, Property)]
 allProperties =
     [ ("affinity: pin falls back to primary", property prop_affinity_pin_falls_back_to_primary)
@@ -1693,4 +1710,8 @@ allProperties =
     , ("reclaim: prune respects cap",                 property prop_pruneReclaims_respects_cap)
     , ("reclaim: prune drops expired",                property prop_pruneReclaims_drops_expired)
     , ("reclaim: prune keeps fresh entries",          property prop_pruneReclaims_keeps_fresh)
+
+    , ("Full layout places only the focused window",  property prop_fullLayout_places_only_focused)
+    , ("focus: hidden-workspace window is routed",    property prop_onHiddenWorkspace_matches_hidden_stacks)
+    , ("focus: hidden-workspace follow requires frontmost app", property prop_shouldFollowIntoHidden_requires_both)
     ]

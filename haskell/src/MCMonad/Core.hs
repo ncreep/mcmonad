@@ -492,6 +492,11 @@ data MState = MState
       -- looping forever in a pathological case and lets user-initiated
       -- focus changes from outside mcmonad eventually take effect.
       -- See the 'FocusIntent' note at the end of this module.
+    , frontmostPid     :: !(Maybe Int32)
+      -- ^ The pid NSWorkspace\/SkyLight last reported as frontmost. Used
+      -- to tell a genuine app switch from AX re-announcing an app's
+      -- window that isn't actually in front (see 'FocusedWindowChanged'
+      -- in "MCMonad.Main").
     , unmanagedOrigin  :: !(Map.Map Int32 (String, UTCTime))
       -- ^ pid → (workspace tag, time) of the pid's most recently
       -- destroyed *last* window. Some apps (Gecko\/LibreWolf) destroy

@@ -549,6 +549,10 @@ struct MCMonadCoreApp {
             executor.execute(command)
         }
 
+        // Public socket for external apps (e.g. alt-tab) to request window focus.
+        // Accepts {"cmd":"focus-window","windowId":N,"pid":P} and injects it as a
+        // menu-focus-window event so the Haskell brain handles it through its normal
+        // focus path (workspace switch + unpark + focusIntent armed).
         // Wire AXFocusTracker — gives us per-window focus events from AX,
         // which carry the actual focused windowId (unlike SkyLight 1508 and
         // NSWorkspace activation, which only know the app PID). Without
@@ -560,6 +564,8 @@ struct MCMonadCoreApp {
             FocusLog.emit(source: .emitFocusedWindowChanged,
                           windowId: windowId, pid: pid,
                           extra: "via=axFocusedWindowChanged")
+            // The brain decides whether the window lives on a hidden workspace
+            // and switches to it; Swift only reports the AX focus event.
             socketServer?.send(.focusedWindowChanged(windowId: windowId, pid: pid))
             // Recency for the launcher's lists.
             spotlight?.recentUse.touch(RecentUse.window(windowId))

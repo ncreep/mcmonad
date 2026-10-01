@@ -1,6 +1,8 @@
 module MCMonad.Main
     ( mcmonad
     , launch
+    , onHiddenWorkspace
+    , shouldFollowIntoHidden
     ) where
 
 import Control.Concurrent (myThreadId)
@@ -163,6 +165,7 @@ launch cfg = do
                        , timers = rsTimers restored
                        , nextTimerId = rsNextTimerId restored
                        , focusIntent = Nothing
+                       , frontmostPid = Nothing
                        , unmanagedOrigin = Map.empty
                        , reclaimOrigin  = Map.empty
                        , pendingRestore = rsPending restored
@@ -420,6 +423,21 @@ eventLoop debug cfg hotkeyIdMap deferred = do
         evt <- withConnection $ \conn -> io $ readEvent conn
         userCodeDef () $ handleEvent debug cfg hotkeyIdMap evt
 
+-- | Whether a window is managed but on no screen, i.e. it sits on a hidden
+-- workspace.
+onHiddenWorkspace :: W.StackSet i l WindowRef sid sd -> WindowRef -> Bool
+onHiddenWorkspace ws w = W.member w ws && w `notElem` visibleScreenWindows ws
+
+-- | Whether a 'FocusedWindowChanged' for a hidden-workspace window should
+-- be followed (switching to that window's workspace) rather than left to
+-- 'handleFocusedWindowChanged'. True only when the window is on a hidden
+-- workspace /and/ its app is the one NSWorkspace\/SkyLight currently
+-- reports as frontmost -- AX re-announces a window that isn't actually in
+-- front just as readily as it reports a genuine focus change, so the
+-- frontmost check is what separates the two cases.
+shouldFollowIntoHidden :: Bool -> Bool -> Bool
+shouldFollowIntoHidden onHidden isFrontmostApp = onHidden && isFrontmostApp
+
 -- | Dispatch a single event from the Swift daemon.
 handleEvent :: Bool -> MConfig Layout -> Map.Map Int (M ()) -> Event -> M ()
 handleEvent debug cfg hotkeyIdMap evt = do
@@ -480,7 +498,18 @@ handleEvent debug cfg hotkeyIdMap evt = do
                 windows (W.float wr (W.RationalRect rx ry rw rh))
 
         FocusedWindowChanged wid pid -> do
-            handleFocusedWindowChanged wid pid
+            -- A window on a hidden workspace whose app is frontmost:
+            -- switch to its workspace and focus it directly, as
+            -- 'MenuFocusWindow' does. Visible-screen windows, and
+            -- hidden-workspace windows whose app isn't frontmost (AX
+            -- re-announcing a background window, not a real focus
+            -- change), still go through the focus-intent classifier.
+            ws0 <- gets windowset
+            front <- gets frontmostPid
+            let wr0 = WindowRef wid pid
+            if shouldFollowIntoHidden (onHiddenWorkspace ws0 wr0) (front == Just pid)
+                then windows (W.focusWindow wr0)
+                else handleFocusedWindowChanged wid pid
             -- A should-be-hidden window receiving AX focus means the
             -- user reached it on screen — it drifted (fullscreen-
             -- transition sweep, app self-move) and is lying around as
@@ -721,6 +750,7 @@ handleFocusedWindowChanged wid pid = do
 
 handleFrontAppChanged :: Int32 -> M ()
 handleFrontAppChanged pid = do
+    modify $ \s -> s { frontmostPid = Just pid }
     fi <- gets focusIntent
     now <- io getCurrentTime
     case fi of
