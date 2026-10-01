@@ -86,7 +86,13 @@ enum AXWindowService {
         let title = attr(2) as? String
 
         let hasCloseButton = hasResolved(3)
-        let hasFullscreenButton = hasResolved(4)
+        // Some windows that don't really support fullscreen (System
+        // Settings, Calculator) report the attribute as "resolved" by this
+        // batch call — the underlying AX error comes back boxed as a value
+        // rather than caught by the NSError filter above — so presence
+        // alone isn't a reliable signal; the element itself has to check
+        // out and be enabled too.
+        let hasFullscreenButton = hasResolved(4) && isAXElementEnabled(attr(4))
 
         // Read frame
         let frame: CGRect
@@ -376,6 +382,25 @@ enum AXWindowService {
     private static func enhancedUserInterfaceEnabled(_ app: AXUIElement) -> Bool {
         var valueRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXEnhancedUserInterface, &valueRef) == .success,
+              let valueRef,
+              CFGetTypeID(valueRef) == CFBooleanGetTypeID()
+        else { return false }
+        return CFBooleanGetValue((valueRef as! CFBoolean))
+    }
+
+    /// Whether an AX button element (e.g. the fullscreen button) is
+    /// present and enabled. Absent, non-element, or unreadable ⇒ false —
+    /// windows that don't really support the capability a button
+    /// stands for tend not to expose a clean readable enabled state
+    /// for it either, so treating "can't tell" as "no" catches those
+    /// rather than defaulting to the more common case.
+    private static func isAXElementEnabled(_ element: Any?) -> Bool {
+        guard let element,
+              CFGetTypeID(element as CFTypeRef) == AXUIElementGetTypeID()
+        else { return false }
+        let axElement = unsafeDowncast(element as AnyObject, to: AXUIElement.self)
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axElement, kAXEnabledAttribute as CFString, &valueRef) == .success,
               let valueRef,
               CFGetTypeID(valueRef) == CFBooleanGetTypeID()
         else { return false }
