@@ -4,7 +4,7 @@ import Test.QuickCheck
 import qualified XMonad.StackSet as W
 import MCMonad.Core
     ( WindowRef(..), ScreenId(..), ScreenDetail(..), Rectangle(..)
-    , updateAffinities, resolveFocusedWindow, resolveFrontApp
+    , updateAffinities, visibleAffinities, resolveFocusedWindow, resolveFrontApp
     , FocusIntent(..), armingIntent, isFocusIntentTarget
     , isIntentTargetPid, isSettlingEcho, isSettlingPidEcho
     , withinSettleWindow, consumeIntent
@@ -1824,6 +1824,18 @@ prop_crossedScreenTag_moves_to_other_screen =
     in crossedScreenTag w otherRect ss == Just "b"
        && crossedScreenTag w ownRect ss == Nothing
 
+-- The saved affinity records only the workspaces currently on a screen
+prop_visibleAffinities_visible_only :: TestStackSet -> Bool
+prop_visibleAffinities_visible_only ss =
+    Map.keysSet aff == Set.fromList visibleTags
+  where
+    aff = visibleAffinities ss
+    visibleTags = map (W.tag . W.workspace) (W.current ss : W.visible ss)
+
+prop_visibleAffinities_fixture :: Bool
+prop_visibleAffinities_fixture =
+    visibleAffinities twoScreenSet == Map.fromList [("a", S 0), ("b", S 1)]
+
 -- Frame repair after a SetFrames readback
 -- An exact match settles the window, however many attempts preceded it
 prop_repairStep_exact_match_forgets :: ScreenDetail -> NonNegative Int -> Bool
@@ -2014,6 +2026,9 @@ allProperties =
     , ("crossed: same screen is no reassignment",     property prop_crossedScreenTag_same_screen_is_nothing)
     , ("crossed: unmanaged window is no reassignment", property prop_crossedScreenTag_nonmember_is_nothing)
     , ("crossed: drop on other screen reassigns",     property prop_crossedScreenTag_moves_to_other_screen)
+
+    , ("saved affinity: visible workspaces only",     property prop_visibleAffinities_visible_only)
+    , ("saved affinity: two-screen fixture",          property prop_visibleAffinities_fixture)
 
     , ("focus: hidden-workspace window is routed",    property prop_onHiddenWorkspace_matches_hidden_stacks)
     , ("focus: hidden-workspace follow requires frontmost app", property prop_shouldFollowIntoHidden_requires_both)

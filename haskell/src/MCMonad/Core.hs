@@ -40,6 +40,7 @@ module MCMonad.Core
     , Connection(..)
       -- * Affinity
     , updateAffinities
+    , visibleAffinities
       -- * Focus resolution
     , resolveFocusedWindow
     , resolveFrontApp
@@ -655,12 +656,14 @@ withWindowSet f = gets windowset >>= f
 -- get their screen recorded; hidden workspaces retain their previous affinity.
 updateAffinities :: Ord i => W.StackSet i l a sid sd -> Map.Map i sid -> Map.Map i sid
 updateAffinities ws existing =
-    Map.union current existing
-  where
-    current = Map.fromList
-        [ (W.tag (W.workspace scr), W.screen scr)
-        | scr <- W.current ws : W.visible ws
-        ]
+    Map.union (visibleAffinities ws) existing
+
+-- | The screen each currently visible workspace is shown on.
+visibleAffinities :: Ord i => W.StackSet i l a sid sd -> Map.Map i sid
+visibleAffinities ws = Map.fromList
+    [ (W.tag (W.workspace scr), W.screen scr)
+    | scr <- W.current ws : W.visible ws
+    ]
 
 -- ---------------------------------------------------------------------------
 -- Focus resolution

@@ -1355,13 +1355,12 @@ journalJumped lbl ws =
 currentSnapshot :: M StateSnapshot
 currentSnapshot = do
     ws   <- gets windowset
-    aff  <- gets learnedAffinity
     ts   <- gets timers
     nid  <- gets nextTimerId
     pend <- gets pendingRestore
     return StateSnapshot
         { snWindowSet   = ws
-        , snAffinity    = aff
+        , snAffinity    = visibleAffinities ws
         , snTimers      = ts
         , snNextTimerId = nid
         , snPending     = pend
