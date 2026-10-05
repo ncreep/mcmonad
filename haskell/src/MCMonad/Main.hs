@@ -560,24 +560,52 @@ handleEvent debug cfg hotkeyIdMap evt = do
             -- triggers a full re-park, not a one-window fix.
             ws <- gets windowset
             mappedSet <- gets mapped
+            natives <- gets nativeFloats
             case findByWindowId wid (W.allWindows ws) of
                 Just wref | not (Set.member wref mappedSet)
                           , not (frameAtParkCorner rect ws)
                     -> reassertHiddenWindows
+                Just wref | Set.member wref mappedSet
+                          , Set.member wref natives
+                    -> do
+                        -- Native floats never get a SetFrames from us, so
+                        -- this is the only record of where it actually is
+                        -- -- used to restore it on the next show (see
+                        -- 'nativeFloatRects').
+                        modify $ \s -> s
+                            { nativeFloatRects = Map.insert wref rect (nativeFloatRects s) }
+                        -- A native float is a real native window: the user
+                        -- drags it by its own title bar, no Option held, so
+                        -- 'WindowDragCompleted' (Option-drag only) never
+                        -- fires for it. This is the only signal that it
+                        -- landed on another screen -- reassign it to that
+                        -- screen's current workspace so it isn't left a
+                        -- member of a workspace it's no longer visually on.
+                        whenJust (crossedScreenTag wref rect ws) $ \dropTag ->
+                            windows (W.shiftWin dropTag wref)
                 _   -> return ()
 
         WindowDragCompleted wid pid rect -> do
-            -- User finished an Option+drag move/resize. Auto-float the window
-            -- at its new absolute position (convert to RationalRect).
+            -- User finished an Option+drag move/resize. Auto-float the
+            -- window at its new absolute position, and -- if the drop
+            -- landed on a different screen -- reassign it to that
+            -- screen's current workspace. Without the reassignment, a
+            -- window dragged across screens stayed a member of its old
+            -- (now not-shown-there) workspace: visually on the new
+            -- screen, but absent from that workspace's window list and
+            -- confusing every subsequent focus/workspace-switch command
+            -- that keys off 'windowset' membership.
             let wr = WindowRef wid pid
             ws <- gets windowset
             when (W.member wr ws) $ do
-                let screenR = findScreenForWindow wr ws
+                let dropScreen = screenAt rect ws
+                    dropTag    = W.tag (W.workspace dropScreen)
+                    screenR    = screenRect (W.screenDetail dropScreen)
                     rx = toRational ((rect_x rect - rect_x screenR) / rect_w screenR)
                     ry = toRational ((rect_y rect - rect_y screenR) / rect_h screenR)
                     rw = toRational (rect_w rect / rect_w screenR)
                     rh = toRational (rect_h rect / rect_h screenR)
-                windows (W.float wr (W.RationalRect rx ry rw rh))
+                windows (W.float wr (W.RationalRect rx ry rw rh) . W.shiftWin dropTag wr)
 
         FocusedWindowChanged wid pid -> do
             -- A window on a hidden workspace whose app is frontmost:

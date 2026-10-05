@@ -69,12 +69,15 @@ module MCMonad.Operations
       -- * Utilities
     , whenJust
     , findScreenForWindow
+    , screenAt
+    , rectOverlapArea
+    , crossedScreenTag
     ) where
 
 import Control.Applicative ((<|>))
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (IOException, catch)
-import Control.Monad (forM, void, unless, when)
+import Control.Monad (forM, guard, void, unless, when)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Pair)
@@ -269,15 +272,27 @@ windows f = do
                               && not (M.member w (W.floating currentAfterSticky)))
                           (allManagedWindows currentAfterSticky)
 
-    -- 5. Resolve floating window positions
+    -- 5. Resolve floating window positions. Native floats (doFloatNative)
+    --    are excluded: mcmonad never writes a frame for them, so there's
+    --    nothing here to resolve on their behalf.
     currentWS <- gets windowset
-    let floatRects = resolveFloating currentWS
+    natives <- gets nativeFloats
+    let floatRects = filter (\(w, _) -> not (S.member w natives)) (resolveFloating currentWS)
 
     -- 6. Send frame assignments, then show/hide. Placing (and raising)
     --    the incoming windows before parking the outgoing ones avoids a
-    --    gap where neither covers the screen.
-    let allPositions = allRects ++ floatRects
-        frames = map toFrameAssignment allPositions
+    --    gap where neither covers the screen. Native floats that just
+    --    became visible are a special case: 'executeShowWindows' is a
+    --    no-op by design (it counts on the SetFrames that normally
+    --    follows), but step 5 deliberately excludes natives from
+    --    'floatRects' -- so without this, one would stay stuck at
+    --    wherever 'HideWindows' parked it. Restore it to its own last
+    --    known frame instead of a layout-computed one.
+    nativeFloatLastKnown <- gets nativeFloatRects
+    let restoredNatives = [ (w, r) | w <- toShow, S.member w natives
+                           , Just r <- [M.lookup w nativeFloatLastKnown] ]
+        allPositions = allRects ++ floatRects
+        frames = map toFrameAssignment (allPositions ++ restoredNatives)
     io $ hPutStrLn stderr $ "FRAMES: " ++ show [(wrWindowId w, rect_x r, rect_y r, rect_w r, rect_h r) | (w, r) <- allPositions]
     unless (null frames) $
         io $ sendCommand conn (SetFrames frames)
@@ -638,6 +653,36 @@ findScreenForWindow w ws =
     windowOnScreen win scr =
         win `elem` W.integrate' (W.stack (W.workspace scr))
 
+-- | The currently-displayed screen whose rect has the greatest overlap
+-- with a given frame -- e.g. the landing position of a completed window
+-- drag. Falls back to the current screen if the frame overlaps no
+-- display (shouldn't normally happen: AppKit constrains window frames to
+-- the display union).
+screenAt :: Rectangle -> W.StackSet String l a ScreenId ScreenDetail
+         -> W.Screen String l a ScreenId ScreenDetail
+screenAt r ws = case sortBy (comparing (Down . overlapArea)) (screensOf ws) of
+    (best:_) -> best
+    []       -> W.current ws
+  where
+    overlapArea scr = rectOverlapArea r (screenRect (W.screenDetail scr))
+
+-- | The workspace tag to reassign @wr@ to, if @rect@ (its new frame) lands
+-- on a different screen than the workspace it's currently in -- e.g. a
+-- drag that crossed screens. 'Nothing' if it's already on the right one
+-- (including if @wr@ isn't a member of @ws@ at all), so callers can treat
+-- it as "nothing to do" directly. Shared by every place a window's frame
+-- can change out from under mcmonad's own bookkeeping: an Option-drag
+-- ('MCMonad.Main' \/ @WindowDragCompleted@) and, for native floats, any
+-- AX frame change at all ('MCMonad.Main' \/ @WindowFrameChanged@), since
+-- those are real native windows a user can drag by their own title bar.
+crossedScreenTag :: Eq a => a -> Rectangle -> W.StackSet String l a ScreenId ScreenDetail
+                 -> Maybe String
+crossedScreenTag wr rect ws = do
+    cur <- W.findTag wr ws
+    let dropTag = W.tag (W.workspace (screenAt rect ws))
+    guard (cur /= dropTag)
+    pure dropTag
+
 -- ---------------------------------------------------------------------------
 -- Window lifecycle
 
@@ -943,11 +988,14 @@ unmanage w = do
                                  (pruneOrigins now (unmanagedOrigin s))
                     }
             Nothing -> return ()
-        -- Clean from sticky, scratchpads, and metadata before removing
+        -- Clean from sticky, scratchpads, native floats, and metadata
+        -- before removing
         modify $ \s -> s
-            { sticky         = S.delete w (sticky s)
-            , scratchpads    = M.filter (/= w) (scratchpads s)
-            , windowMetadata = M.delete w (windowMetadata s)
+            { sticky           = S.delete w (sticky s)
+            , scratchpads      = M.filter (/= w) (scratchpads s)
+            , nativeFloats     = S.delete w (nativeFloats s)
+            , nativeFloatRects = M.delete w (nativeFloatRects s)
+            , windowMetadata   = M.delete w (windowMetadata s)
             }
         -- W.delete, not W.delete': delete' deliberately leaves the
         -- floating entry behind (xmonad keeps it for temporary

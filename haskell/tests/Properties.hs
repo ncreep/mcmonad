@@ -25,6 +25,7 @@ import MCMonad.Operations
     ( frameAtParkCorner, reassignScreens
     , chooseOriginTag, pruneReclaims, reclaimOriginTTL, reclaimOriginCap
     , placeManaged, windowsToPark
+    , screenAt, rectOverlapArea, crossedScreenTag
     , attributeIgnoredWindows
     , replaceWindowIdentity
     )
@@ -1769,6 +1770,59 @@ prop_ignoredAttributionReply_wire wids (SD r) =
         "\"cmd\":\"ignored-attribution-reply\"" `L.isInfixOf` json
         && ("\"windowIds\":[" ++ L.intercalate "," (map show wids) ++ "]") `L.isInfixOf` json
 
+-- Overlap area of two rectangles
+prop_rectOverlapArea_symmetric :: ScreenDetail -> ScreenDetail -> Bool
+prop_rectOverlapArea_symmetric (SD a) (SD b) = rectOverlapArea a b == rectOverlapArea b a
+
+prop_rectOverlapArea_nonnegative :: ScreenDetail -> ScreenDetail -> Bool
+prop_rectOverlapArea_nonnegative (SD a) (SD b) = rectOverlapArea a b >= 0
+
+prop_rectOverlapArea_adjacent_is_zero :: ScreenDetail -> Bool
+prop_rectOverlapArea_adjacent_is_zero (SD a) =
+    rectOverlapArea a a { rect_x = rect_x a + rect_w a + 1 } == 0
+
+-- The landing screen is the one with the greatest overlap with the frame
+prop_screenAt_picks_max_overlap :: TestStackSet -> ScreenDetail -> Bool
+prop_screenAt_picks_max_overlap ss (SD r) =
+    let overlapWith scr = rectOverlapArea r (screenRect (W.screenDetail scr))
+        best = overlapWith (screenAt r ss)
+    in all (\scr -> overlapWith scr <= best) (W.current ss : W.visible ss)
+
+-- A window already on the screen a frame lands on is not reassigned. Only
+-- screens that overlap no other screen are used, since physical displays
+-- do not overlap.
+prop_crossedScreenTag_same_screen_is_nothing :: TestStackSet -> Property
+prop_crossedScreenTag_same_screen_is_nothing ss =
+    not (null onVisible) ==>
+    forAll (elements onVisible) $ \(w, scr) ->
+        crossedScreenTag w (screenRect (W.screenDetail scr)) ss == Nothing
+  where
+    allScreens = W.current ss : W.visible ss
+    onVisible =
+        [ (w, scr) | scr <- allScreens
+                   , let r = screenRect (W.screenDetail scr)
+                   , rect_w r > 0, rect_h r > 0
+                   , all (\o -> W.screen o == W.screen scr
+                              || rectOverlapArea r (screenRect (W.screenDetail o)) == 0)
+                         allScreens
+                   , w <- W.integrate' (W.stack (W.workspace scr)) ]
+
+-- A window that is not managed is never reassigned
+prop_crossedScreenTag_nonmember_is_nothing :: TestStackSet -> WindowRef -> Property
+prop_crossedScreenTag_nonmember_is_nothing ss w =
+    not (W.member w ss) ==>
+    forAll arbitrary $ \(SD r) -> crossedScreenTag w r ss == Nothing
+
+-- Dropping a managed window onto the other screen reassigns it to that screen's tag
+prop_crossedScreenTag_moves_to_other_screen :: Bool
+prop_crossedScreenTag_moves_to_other_screen =
+    let w = WindowRef 1 1
+        ss = W.insertUp w twoScreenSet
+        otherRect = screenRect (W.screenDetail (head (W.visible ss)))
+        ownRect = screenRect (W.screenDetail (W.current ss))
+    in crossedScreenTag w otherRect ss == Just "b"
+       && crossedScreenTag w ownRect ss == Nothing
+
 allProperties :: [(String, Property)]
 allProperties =
     [ ("affinity: pin falls back to primary", property prop_affinity_pin_falls_back_to_primary)
@@ -1929,6 +1983,14 @@ allProperties =
     , ("burst: destroy/create pair in either order",  property prop_pairBurst_pairs_either_order)
     , ("burst: pairing needs both halves",            property prop_pairBurst_needs_both_halves)
     , ("burst: unrelated events are kept",            property prop_pairBurst_keeps_unrelated_events)
+
+    , ("overlap area is symmetric",                   property prop_rectOverlapArea_symmetric)
+    , ("overlap area is non-negative",                property prop_rectOverlapArea_nonnegative)
+    , ("overlap area of adjacent rects is zero",      property prop_rectOverlapArea_adjacent_is_zero)
+    , ("screenAt picks the greatest overlap",         property prop_screenAt_picks_max_overlap)
+    , ("crossed: same screen is no reassignment",     property prop_crossedScreenTag_same_screen_is_nothing)
+    , ("crossed: unmanaged window is no reassignment", property prop_crossedScreenTag_nonmember_is_nothing)
+    , ("crossed: drop on other screen reassigns",     property prop_crossedScreenTag_moves_to_other_screen)
 
     , ("focus: hidden-workspace window is routed",    property prop_onHiddenWorkspace_matches_hidden_stacks)
     , ("focus: hidden-workspace follow requires frontmost app", property prop_shouldFollowIntoHidden_requires_both)
