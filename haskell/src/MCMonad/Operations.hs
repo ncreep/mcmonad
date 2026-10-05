@@ -7,6 +7,10 @@ module MCMonad.Operations
     , viewWorkspace
     , warpToFocus
     , reassertHiddenWindows
+    , repairFrame
+    , RepairStep(..)
+    , repairStep
+    , maxRepairAttempts
     , frameAtParkCorner
     , attributeIgnoredWindows
       -- * Window lifecycle
@@ -294,7 +298,9 @@ windows f = do
         allPositions = allRects ++ floatRects
         frames = map toFrameAssignment (allPositions ++ restoredNatives)
     io $ hPutStrLn stderr $ "FRAMES: " ++ show [(wrWindowId w, rect_x r, rect_y r, rect_w r, rect_h r) | (w, r) <- allPositions]
-    unless (null frames) $
+    unless (null frames) $ do
+        -- A new layout decision for these windows voids any earlier repair.
+        modify $ \s -> s { frameRepairs = foldr (M.delete . faWindowId) (frameRepairs s) frames }
         io $ sendCommand conn (SetFrames frames)
 
     unless (null toShow) $
@@ -489,6 +495,68 @@ frameAtParkCorner r ws = any nearRightEdge screenRects && widestExposure <= 2
         | span_ (rect_y r) (rect_h r) (rect_y sr) (rect_h sr) <= 0 = 0
         | otherwise = span_ (rect_x r) (rect_w r) (rect_x sr) (rect_w sr)
     span_ a la b lb = max 0 (min (a + la) (b + lb) - max a b)
+
+-- | Decide what to do about a window whose frame is off the one we last
+-- asked for. Called from a SetFrames readback ('WindowFrameDefied'), from
+-- a grace-period re-read of the same readback that is still off target,
+-- and from later frame-change events for a window still awaiting repair
+-- — so a repair gets checked again whether or not the window ever
+-- reports a frame change on its own.
+--
+-- A frame written while the window was still on another display can be
+-- clamped or outright refused, and the app's own late correction is not
+-- always reported. A lone single-window SetFrames for it doesn't reliably
+-- take, the same way a full layout pass (e.g. the one triggered by raising
+-- a different window) does, so the re-send goes through a full relayout
+-- rather than a bespoke single-window command. This happens up to
+-- 'maxRepairAttempts' times across this layout decision, so a window that
+-- genuinely refuses cannot loop forever.
+repairFrame :: Word32 -> Int32 -> Rectangle -> Rectangle -> M ()
+repairFrame wid pid want actual = do
+    reps <- gets frameRepairs
+    let attempts = maybe 0 frAttempts (M.lookup wid reps)
+        keep r = modify $ \s -> s { frameRepairs = M.insert wid r (frameRepairs s) }
+    case repairStep want actual attempts of
+        RepairForget -> modify $ \s -> s { frameRepairs = M.delete wid (frameRepairs s) }
+        RepairDone -> return ()
+        RepairResend -> do
+            io $ hPutStrLn stderr $ "REPAIR: re-sending frame for " ++ show wid
+            windows id
+            -- 'windows' clears any tracking entry for a window it just sent
+            -- a frame for, so the attempt count is kept *after* it runs,
+            -- not before, or it would be wiped by the very call that
+            -- records it.
+            keep (FrameRepair pid want (attempts + 1))
+
+-- | What to do with a window whose readback found it off its wanted frame.
+data RepairStep
+    = RepairForget   -- ^ position and size both match: the layout landed, drop the entry
+    | RepairDone     -- ^ already re-sent the maximum number of times: leave it
+    | RepairResend   -- ^ position and/or size are off: re-send the frame
+    deriving (Eq, Show)
+
+-- | How many times a frame is re-sent for a single layout decision before
+-- a window that keeps refusing it is left alone.
+maxRepairAttempts :: Int
+maxRepairAttempts = 3
+
+-- | The repair step for a wanted frame, the observed frame, and how many
+-- times the frame has already been re-sent for this layout decision.
+--
+-- Position and size are treated symmetrically: a window can refuse a
+-- cross-display position write outright, with no later event ever
+-- correcting it, so a defiance of position alone has to be actively
+-- re-sent the same as a defiance of size.
+repairStep :: Rectangle -> Rectangle -> Int -> RepairStep
+repairStep want actual attempts
+    | sameSize && samePosition = RepairForget
+    | attempts >= maxRepairAttempts = RepairDone
+    | otherwise = RepairResend
+  where
+    samePosition = abs (rect_x want - rect_x actual) < 1.5
+                && abs (rect_y want - rect_y actual) < 1.5
+    sameSize = abs (rect_w want - rect_w actual) < 1.5
+            && abs (rect_h want - rect_h actual) < 1.5
 
 -- | Convert a (WindowRef, Rectangle) pair to a FrameAssignment.
 toFrameAssignment :: (WindowRef, Rectangle) -> FrameAssignment

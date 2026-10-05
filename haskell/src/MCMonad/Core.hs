@@ -35,6 +35,7 @@ module MCMonad.Core
     , ChangeLayout(..)
       -- * Geometry
     , Rectangle(..)
+    , FrameRepair(..)
       -- * IPC connection (opaque)
     , Connection(..)
       -- * Affinity
@@ -308,6 +309,17 @@ data Rectangle = Rectangle
     , rect_h :: !Double
     } deriving (Eq, Show, Read, Generic)
 
+-- | A window whose SetFrames readback found it off the frame we asked for.
+-- 'frAttempts' counts how many times the size has been re-sent for that
+-- layout decision, capped at 'MCMonad.Operations.maxRepairAttempts' so a
+-- window that permanently refuses the size eventually stops being retried.
+-- See 'MCMonad.Operations.repairFrame'.
+data FrameRepair = FrameRepair
+    { frPid      :: !Int32
+    , frWant     :: !Rectangle
+    , frAttempts :: !Int
+    } deriving (Show)
+
 instance FromJSON Rectangle where
     parseJSON = Aeson.withObject "Rectangle" $ \v ->
         Rectangle <$> v .: "x" <*> v .: "y" <*> v .: "w" <*> v .: "h"
@@ -463,6 +475,11 @@ data MState = MState
       -- ^ Whether to draw debug frame overlays. Off by default. Toggled
       -- by 'MCMonad.Debug.toggleDebugOverlays' (either from xmonad.hs
       -- or the menubar's "Debug frame overlays" item).
+    , frameRepairs     :: !(Map.Map Word32 FrameRepair)
+      -- ^ Windows the brain is watching for a size repair, keyed by
+      -- window id. Filled by 'MCMonad.IPC.WindowFrameDefied' readbacks,
+      -- re-checked on later frame changes, cleared on the next layout
+      -- decision for the window and on destroy.
     , ignoredWindows   :: !(Set WindowRef)
       -- ^ Windows the manage hook explicitly 'MCMonad.ManageHook.doIgnore'd:
       -- present in 'windowMetadata' but deliberately absent from

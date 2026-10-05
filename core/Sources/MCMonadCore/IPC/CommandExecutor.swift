@@ -6,41 +6,6 @@ import os
 
 private let logger = Logger(subsystem: "com.mcmonad.core", category: "CommandExecutor")
 
-/// Frames the SetFrames readback found a window not at. The next frame-change
-/// event for that window re-sends the size once its position has landed, so
-/// a size clamped while the window was still on another display gets fixed as
-/// soon as the app reports the move, not on some later layout pass.
-@MainActor
-enum FrameRepair {
-    private struct Pending {
-        let pid: pid_t
-        let frame: CGRect
-    }
-
-    private static var pending: [UInt32: Pending] = [:]
-
-    static func expect(windowId: UInt32, pid: pid_t, frame: CGRect) {
-        pending[windowId] = Pending(pid: pid, frame: frame)
-    }
-
-    static func clear(windowId: UInt32) {
-        pending.removeValue(forKey: windowId)
-    }
-
-    static func observe(windowId: UInt32, actual: CGRect) {
-        guard let want = pending[windowId] else { return }
-        switch compareFrame(wanted: want.frame, actual: actual) {
-        case .settled:
-            clear(windowId: windowId)
-        case .sizeMismatch:
-            clear(windowId: windowId)
-            AXWindowService.setFrame(want.frame, windowId: windowId, pid: want.pid, currentHint: actual)
-        case .positionPending:
-            break
-        }
-    }
-}
-
 @MainActor
 final class CommandExecutor {
     let hotkeyManager: HotkeyManager
@@ -281,10 +246,11 @@ final class CommandExecutor {
                          + "delta=(\(fmtCoord(dx)),\(fmtCoord(dy)),"
                          + "\(fmtCoord(dw)),\(fmtCoord(dh)))"
                 )
-                if obeyed {
-                    FrameRepair.clear(windowId: a.windowId)
-                } else {
-                    FrameRepair.expect(windowId: a.windowId, pid: a.pid, frame: a.frame)
+                if !obeyed {
+                    // Report only; the brain decides whether to re-send.
+                    socketServer.send(.windowFrameDefied(
+                        windowId: a.windowId, pid: a.pid,
+                        want: a.frame, frame: actual))
                     scheduleReverify(windowId: a.windowId, pid: a.pid,
                                      want: a.frame)
                 }
@@ -319,10 +285,10 @@ final class CommandExecutor {
     /// (Gecko once its a11y engine has engaged — even with
     /// AXEnhancedUserInterface suppressed around the write, the app
     /// processes the queued setter on its own time). Re-read once after a
-    /// grace period and log the ground truth so DEFIED lines can be told
-    /// apart from genuinely refused moves without hand-correlating later
-    /// `observed` events. Observability only — the brain's declarative
-    /// re-assertion is the corrective path.
+    /// grace period and report the result to the brain the same way the
+    /// original readback was, whether or not it settled, so a repair gets
+    /// a guaranteed check even when no frame-change event arrives for it
+    /// in the meantime, and its outcome is never left unrecorded.
     private func scheduleReverify(windowId: UInt32, pid: Int32, want: CGRect) {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -341,6 +307,8 @@ final class CommandExecutor {
                 result: obeyed ? "obeyed-late" : "still-defied",
                 extra: wantStr
             )
+            socketServer.send(.windowFrameDefied(
+                windowId: windowId, pid: pid, want: want, frame: actual))
         }
     }
 

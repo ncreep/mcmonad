@@ -65,7 +65,7 @@ import MCMonad.Core (Connection(..), Rectangle(..), WindowMetadata(..), Timer(..
 -- guard prevents the crash-loop that happens when a Mod-q-compiled
 -- binary lingers across an mcmonad upgrade and speaks the old protocol.
 protocolVersion :: Int
-protocolVersion = 13
+protocolVersion = 14
 
 -- ---------------------------------------------------------------------------
 -- Commands (Haskell -> Swift)
@@ -332,6 +332,10 @@ data Event
     = WindowCreated WindowInfo
     | WindowDestroyed !Word32
     | WindowFrameChanged !Word32 !Rectangle
+    | WindowFrameDefied !Word32 !Int32 !Rectangle !Rectangle
+      -- ^ A SetFrames readback found the window off its wanted frame:
+      -- window id, pid, wanted frame, actual frame. A fact from Swift;
+      -- whether to re-send is decided by the brain.
     | FrontAppChanged !Int32
     | FocusedWindowChanged !Word32 !Int32
     | FocusedWindowQueryResponse !Word32 !Int32
@@ -465,6 +469,7 @@ instance Aeson.FromJSON Event where
                 "window-created"       -> WindowCreated      <$> Aeson.parseJSON (Aeson.Object v)
                 "window-destroyed"     -> WindowDestroyed    <$> v .: "windowId"
                 "window-frame-changed" -> WindowFrameChanged <$> v .: "windowId" <*> v .: "frame"
+                "window-frame-defied"  -> WindowFrameDefied <$> v .: "windowId" <*> v .: "pid" <*> v .: "want" <*> v .: "frame"
                 "front-app-changed"    -> FrontAppChanged    <$> v .: "pid"
                 "focused-window-changed" -> FocusedWindowChanged <$> v .: "windowId" <*> v .: "pid"
                 "focused-window-query-response" -> FocusedWindowQueryResponse <$> v .: "windowId" <*> v .: "pid"

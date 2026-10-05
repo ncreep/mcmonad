@@ -275,8 +275,16 @@ final class EventBridge: SkyLightEventDelegate {
     ) {
         switch event {
         case .created(let windowId, _):
-            fputs("DEBUG: skyLightEvent .created wid=\(windowId) wasManaged=\(managedWindowIds.contains(windowId))\n", stderr)
-            // Query SkyLight for the snapshot, then enrich with AX
+            // A created notification can be spurious — SkyLight fires one
+            // for a window that's already managed, most commonly around a
+            // cross-screen AX move. Re-adopting it would re-run the manage
+            // hook and a full layout pass for a window the brain already
+            // knows about, so a window already in `managedWindowIds` is
+            // left alone.
+            guard !managedWindowIds.contains(windowId) else {
+                fputs("DEBUG: skyLightEvent .created wid=\(windowId) ignored (already managed)\n", stderr)
+                break
+            }
             if let snap = SkyLightQuery.queryWindow(windowId) {
                 adoptWindow(snap)
             }
@@ -321,7 +329,6 @@ final class EventBridge: SkyLightEventDelegate {
                 FrameLog.emit(source: .observed, windowId: windowId, rect: bounds,
                               tHash: TitleHash.hash(windowId: windowId))
                 socketServer.send(.windowFrameChanged(windowId: windowId, frame: bounds))
-                FrameRepair.observe(windowId: windowId, actual: bounds)
             } else {
                 FrameLog.emit(source: .observed, windowId: windowId,
                               tHash: TitleHash.hash(windowId: windowId),

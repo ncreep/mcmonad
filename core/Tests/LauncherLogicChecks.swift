@@ -19,7 +19,6 @@ enum LauncherLogicChecks {
         checkRecency()
         checkOverlayScreenWire()
         checkWorkspaceWindowLookup()
-        checkFrameCompare()
         checkParkGeometry()
         checkParkedHome()
         print("Launcher logic checks passed")
@@ -335,19 +334,5 @@ enum LauncherLogicChecks {
             == CGRect(x: 300, y: 250, width: 400, height: 300))
         precondition(centeredFrame(of: CGSize(width: 400, height: 300), on: CGRect(x: 1000, y: 0, width: 1000, height: 800))
             == CGRect(x: 1300, y: 250, width: 400, height: 300))
-    }
-
-    // MARK: Frame readback
-
-    static func checkFrameCompare() {
-        let want = CGRect(x: 100, y: 100, width: 800, height: 600)
-        precondition(compareFrame(wanted: want, actual: want) == .settled)
-        precondition(compareFrame(wanted: want, actual: want.offsetBy(dx: 1, dy: -1)) == .settled, "within tolerance")
-        // position landed, size clamped by the display it was on
-        precondition(compareFrame(wanted: want, actual: CGRect(x: 100, y: 100, width: 500, height: 600)) == .sizeMismatch)
-        precondition(compareFrame(wanted: want, actual: CGRect(x: 101, y: 99, width: 800, height: 400)) == .sizeMismatch)
-        // position not landed yet
-        precondition(compareFrame(wanted: want, actual: CGRect(x: 900, y: 100, width: 500, height: 600)) == .positionPending)
-        precondition(compareFrame(wanted: want, actual: CGRect(x: 100, y: 100, width: 801.5, height: 600)) == .sizeMismatch, "exactly 1.5 is outside tolerance")
     }
 }

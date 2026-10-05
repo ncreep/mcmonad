@@ -318,6 +318,9 @@ enum IPCEvent: Encodable, Sendable {
     case windowCreated(WindowInfo)
     case windowDestroyed(windowId: UInt32)
     case windowFrameChanged(windowId: UInt32, frame: CGRect)
+    /// A SetFrames readback found the window off its wanted frame. Reported
+    /// as a fact; the brain decides whether to re-send.
+    case windowFrameDefied(windowId: UInt32, pid: Int32, want: CGRect, frame: CGRect)
     case frontAppChanged(pid: Int32)
     case focusedWindowChanged(windowId: UInt32, pid: Int32)
     case screensChanged(screens: [ScreenInfo])
@@ -363,6 +366,12 @@ enum IPCEvent: Encodable, Sendable {
         case .windowFrameChanged(let windowId, let frame):
             try container.encode("window-frame-changed", forKey: .event)
             try container.encode(windowId, forKey: .windowId)
+            try container.encode(FlatRect(frame), forKey: .frame)
+        case .windowFrameDefied(let windowId, let pid, let want, let frame):
+            try container.encode("window-frame-defied", forKey: .event)
+            try container.encode(windowId, forKey: .windowId)
+            try container.encode(pid, forKey: .pid)
+            try container.encode(FlatRect(want), forKey: .want)
             try container.encode(FlatRect(frame), forKey: .frame)
         case .frontAppChanged(let pid):
             try container.encode("front-app-changed", forKey: .event)
@@ -571,6 +580,7 @@ private struct DynamicCodingKey: CodingKey {
     static let windowId = DynamicCodingKey(stringValue: "windowId")!
     static let windowIds = DynamicCodingKey(stringValue: "windowIds")!
     static let pid = DynamicCodingKey(stringValue: "pid")!
+    static let want = DynamicCodingKey(stringValue: "want")!
     static let title = DynamicCodingKey(stringValue: "title")!
     static let appName = DynamicCodingKey(stringValue: "appName")!
     static let bundleId = DynamicCodingKey(stringValue: "bundleId")!

@@ -163,6 +163,7 @@ launch cfg = do
                        , windowMetadata = seededMetadata
                        , debugOverlays = False
                        , ignoredWindows = Set.empty
+                       , frameRepairs = Map.empty
                        , nativeFloats = Set.empty
                        , nativeFloatRects = Map.empty
                        , lastSaveAt = Nothing
@@ -541,6 +542,7 @@ handleEvent debug cfg hotkeyIdMap evt = do
 
         WindowDestroyed wid -> do
             forgetPending wid
+            modify $ \s -> s { frameRepairs = Map.delete wid (frameRepairs s) }
             ws <- gets windowset
             ignored <- gets ignoredWindows
             -- An ignored window is never in 'W.allWindows', so it has to
@@ -549,7 +551,14 @@ handleEvent debug cfg hotkeyIdMap evt = do
             let mref = findByWindowId wid (W.allWindows ws ++ Set.toList ignored)
             whenJust mref $ \wref -> unmanage wref
 
+        WindowFrameDefied wid pid want actual ->
+            repairFrame wid pid want actual
+
         WindowFrameChanged wid rect -> do
+            -- A window still awaiting a size repair re-checks on each frame change.
+            reps <- gets frameRepairs
+            whenJust (Map.lookup wid reps) $ \r ->
+                repairFrame wid (frPid r) (frWant r) rect
             -- SkyLight frame-change events fire constantly (including from our
             -- own SetFrames); drag completion is handled by the explicit
             -- WindowDragCompleted event below. The one report we act on: a

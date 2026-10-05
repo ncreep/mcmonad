@@ -26,6 +26,7 @@ import MCMonad.Operations
     , chooseOriginTag, pruneReclaims, reclaimOriginTTL, reclaimOriginCap
     , placeManaged, windowsToPark
     , screenAt, rectOverlapArea, crossedScreenTag
+    , RepairStep(..), repairStep, maxRepairAttempts
     , attributeIgnoredWindows
     , replaceWindowIdentity
     )
@@ -1823,6 +1824,28 @@ prop_crossedScreenTag_moves_to_other_screen =
     in crossedScreenTag w otherRect ss == Just "b"
        && crossedScreenTag w ownRect ss == Nothing
 
+-- Frame repair after a SetFrames readback
+-- An exact match settles the window, however many attempts preceded it
+prop_repairStep_exact_match_forgets :: ScreenDetail -> NonNegative Int -> Bool
+prop_repairStep_exact_match_forgets (SD w) (NonNegative attempts) =
+    repairStep w w attempts == RepairForget
+
+-- A position mismatch is actively re-sent, the same as a size mismatch --
+-- some apps refuse a cross-display position write outright, with no later
+-- event ever correcting it on their own, so it can't be left to settle by
+-- itself the way a size-only mismatch used to be
+prop_repairStep_position_mismatch_resends :: ScreenDetail -> Bool
+prop_repairStep_position_mismatch_resends (SD w) =
+    repairStep w w { rect_x = rect_x w + 10 } 0 == RepairResend
+
+-- A mismatch in either position or size is re-sent up to the attempt cap
+-- per layout decision, then left alone
+prop_repairStep_resends_until_cap :: ScreenDetail -> Bool
+prop_repairStep_resends_until_cap (SD w) =
+    let off = w { rect_w = rect_w w + 10 }
+    in all (\n -> repairStep w off n == RepairResend) [0 .. maxRepairAttempts - 1]
+        && repairStep w off maxRepairAttempts == RepairDone
+
 allProperties :: [(String, Property)]
 allProperties =
     [ ("affinity: pin falls back to primary", property prop_affinity_pin_falls_back_to_primary)
@@ -1998,4 +2021,8 @@ allProperties =
     , ("ignored: attributed to nearest screen, parked excluded", property prop_attributeIgnored_home_screen)
     , ("ignored: fact JSON parses back",              property prop_ignoredFact_parses_back)
     , ("ignored: attribution reply wire format",      property prop_ignoredAttributionReply_wire)
+
+    , ("repair: exact match settles",                 property prop_repairStep_exact_match_forgets)
+    , ("repair: position mismatch is re-sent",        property prop_repairStep_position_mismatch_resends)
+    , ("repair: frame re-sent until the attempt cap",   property prop_repairStep_resends_until_cap)
     ]
