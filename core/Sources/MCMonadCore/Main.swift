@@ -321,6 +321,7 @@ final class EventBridge: SkyLightEventDelegate {
                 FrameLog.emit(source: .observed, windowId: windowId, rect: bounds,
                               tHash: TitleHash.hash(windowId: windowId))
                 socketServer.send(.windowFrameChanged(windowId: windowId, frame: bounds))
+                FrameRepair.observe(windowId: windowId, actual: bounds)
             } else {
                 FrameLog.emit(source: .observed, windowId: windowId,
                               tHash: TitleHash.hash(windowId: windowId),

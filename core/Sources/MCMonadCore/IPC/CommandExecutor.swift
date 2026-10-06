@@ -6,6 +6,41 @@ import os
 
 private let logger = Logger(subsystem: "com.mcmonad.core", category: "CommandExecutor")
 
+/// Frames the SetFrames readback found a window not at. The next frame-change
+/// event for that window re-sends the size once its position has landed, so
+/// a size clamped while the window was still on another display gets fixed as
+/// soon as the app reports the move, not on some later layout pass.
+@MainActor
+enum FrameRepair {
+    private struct Pending {
+        let pid: pid_t
+        let frame: CGRect
+    }
+
+    private static var pending: [UInt32: Pending] = [:]
+
+    static func expect(windowId: UInt32, pid: pid_t, frame: CGRect) {
+        pending[windowId] = Pending(pid: pid, frame: frame)
+    }
+
+    static func clear(windowId: UInt32) {
+        pending.removeValue(forKey: windowId)
+    }
+
+    static func observe(windowId: UInt32, actual: CGRect) {
+        guard let want = pending[windowId] else { return }
+        switch compareFrame(wanted: want.frame, actual: actual) {
+        case .settled:
+            clear(windowId: windowId)
+        case .sizeMismatch:
+            clear(windowId: windowId)
+            AXWindowService.setFrame(want.frame, windowId: windowId, pid: want.pid, currentHint: actual)
+        case .positionPending:
+            break
+        }
+    }
+}
+
 @MainActor
 final class CommandExecutor {
     let hotkeyManager: HotkeyManager
@@ -121,16 +156,15 @@ final class CommandExecutor {
         // position (5128, 0) before this set-frames touches it, we'll
         // see it here — disambiguating "this set-frames bumped it"
         // from "it was pinned before we started".
+        var preMoveBounds: [UInt32: CGRect] = [:]
         for (a, _) in resolved {
             let tHash = TitleHash.hash(windowId: a.windowId, pid: a.pid)
             if let preBounds = skylight.getWindowBounds(a.windowId) {
+                preMoveBounds[a.windowId] = preBounds
                 FrameLog.emit(source: .preMove,
                               windowId: a.windowId, pid: a.pid, rect: preBounds,
                               tHash: tHash,
-                              extra: "want=(\(fmtCoord(a.frame.origin.x)),"
-                                   + "\(fmtCoord(a.frame.origin.y)),"
-                                   + "\(fmtCoord(a.frame.width)),"
-                                   + "\(fmtCoord(a.frame.height)))")
+                              extra: "want=\(fmtRect(a.frame))")
             } else {
                 FrameLog.emit(source: .preMove,
                               windowId: a.windowId, pid: a.pid, rect: a.frame,
@@ -153,23 +187,19 @@ final class CommandExecutor {
         )
         defer { AXWindowService.restoreEnhancedUserInterface(suppressedEUI) }
 
-        skylight.disableUpdate()
-
-        // Phase 1: Set all sizes (prevents overlaps that clamp sizes)
-        for (a, ax) in resolved {
-            var size = CGSize(width: a.frame.width, height: a.frame.height)
-            if let v = AXValueCreate(.cgSize, &size) {
-                let err = AXUIElementSetAttributeValue(ax, kAXSizeAttribute as CFString, v)
-                FrameLog.emit(source: .cmdAxSize,
-                              windowId: a.windowId, pid: a.pid, rect: a.frame,
-                              tHash: TitleHash.hash(windowId: a.windowId, pid: a.pid),
-                              result: err == .success ? "ok" : "err",
-                              extra: "phase=1 axStatus=\(err.rawValue)")
+        // Growing windows move then size; others size then move. macOS clamps
+        // size against the display the window is on when written.
+        var growing: Set<UInt32> = []
+        for (a, _) in resolved {
+            if let cur = preMoveBounds[a.windowId],
+               a.frame.width > cur.width + 0.5 || a.frame.height > cur.height + 0.5 {
+                growing.insert(a.windowId)
             }
         }
 
-        // Phase 2: Set all positions
-        for (a, ax) in resolved {
+        skylight.disableUpdate()
+
+        func writePosition(_ a: FrameAssignment, _ ax: AXUIElement, phase: Int) {
             var pos = CGPoint(x: a.frame.origin.x, y: a.frame.origin.y)
             if let v = AXValueCreate(.cgPoint, &pos) {
                 let err = AXUIElementSetAttributeValue(ax, kAXPositionAttribute as CFString, v)
@@ -177,12 +207,11 @@ final class CommandExecutor {
                               windowId: a.windowId, pid: a.pid, rect: a.frame,
                               tHash: TitleHash.hash(windowId: a.windowId, pid: a.pid),
                               result: err == .success ? "ok" : "err",
-                              extra: "phase=2 axStatus=\(err.rawValue)")
+                              extra: "phase=\(phase) axStatus=\(err.rawValue)")
             }
         }
 
-        // Phase 3: Set sizes again (fix any clamped during moves)
-        for (a, ax) in resolved {
+        func writeSize(_ a: FrameAssignment, _ ax: AXUIElement, phase: Int) {
             var size = CGSize(width: a.frame.width, height: a.frame.height)
             if let v = AXValueCreate(.cgSize, &size) {
                 let err = AXUIElementSetAttributeValue(ax, kAXSizeAttribute as CFString, v)
@@ -190,8 +219,31 @@ final class CommandExecutor {
                               windowId: a.windowId, pid: a.pid, rect: a.frame,
                               tHash: TitleHash.hash(windowId: a.windowId, pid: a.pid),
                               result: err == .success ? "ok" : "err",
-                              extra: "phase=3 axStatus=\(err.rawValue)")
+                              extra: "phase=\(phase) axStatus=\(err.rawValue)")
             }
+        }
+
+        // Phase 1: first write per window (move if growing, else size).
+        for (a, ax) in resolved {
+            if growing.contains(a.windowId) {
+                writePosition(a, ax, phase: 1)
+            } else {
+                writeSize(a, ax, phase: 1)
+            }
+        }
+
+        // Phase 2: second write per window (size if growing, else move).
+        for (a, ax) in resolved {
+            if growing.contains(a.windowId) {
+                writeSize(a, ax, phase: 2)
+            } else {
+                writePosition(a, ax, phase: 2)
+            }
+        }
+
+        // Phase 3: Set sizes again (fix any clamped during moves)
+        for (a, ax) in resolved {
+            writeSize(a, ax, phase: 3)
         }
 
         // Phase 4: order windows to the front via SkyLight, not AXRaise —
@@ -219,23 +271,20 @@ final class CommandExecutor {
                 let dy = actual.origin.y - a.frame.origin.y
                 let dw = actual.width    - a.frame.width
                 let dh = actual.height   - a.frame.height
-                // 1.5px tolerance — round-trip through CGFloat / AXValue
-                // can introduce sub-pixel rounding noise.
-                let obeyed = abs(dx) < 1.5 && abs(dy) < 1.5
-                          && abs(dw) < 1.5 && abs(dh) < 1.5
+                let obeyed = framesMatch(actual, a.frame)
                 FrameLog.emit(
                     source: .verified,
                     windowId: a.windowId, pid: a.pid, rect: actual,
                     tHash: tHash,
                     result: obeyed ? "obeyed" : "DEFIED",
-                    extra: "want=(\(fmtCoord(a.frame.origin.x)),"
-                         + "\(fmtCoord(a.frame.origin.y)),"
-                         + "\(fmtCoord(a.frame.width)),"
-                         + "\(fmtCoord(a.frame.height))) "
+                    extra: "want=\(fmtRect(a.frame)) "
                          + "delta=(\(fmtCoord(dx)),\(fmtCoord(dy)),"
                          + "\(fmtCoord(dw)),\(fmtCoord(dh)))"
                 )
-                if !obeyed {
+                if obeyed {
+                    FrameRepair.clear(windowId: a.windowId)
+                } else {
+                    FrameRepair.expect(windowId: a.windowId, pid: a.pid, frame: a.frame)
                     scheduleReverify(windowId: a.windowId, pid: a.pid,
                                      want: a.frame)
                 }
@@ -253,6 +302,18 @@ final class CommandExecutor {
         return s.hasSuffix(".0") ? String(s.dropLast(2)) : s
     }
 
+    private func fmtRect(_ r: CGRect) -> String {
+        "(\(fmtCoord(r.origin.x)),\(fmtCoord(r.origin.y)),"
+            + "\(fmtCoord(r.width)),\(fmtCoord(r.height)))"
+    }
+
+    /// Whether two frames agree within 1.5px per component — round-trip
+    /// through CGFloat / AXValue can introduce sub-pixel rounding noise.
+    private func framesMatch(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.origin.x - b.origin.x) < 1.5 && abs(a.origin.y - b.origin.y) < 1.5
+            && abs(a.width - b.width) < 1.5 && abs(a.height - b.height) < 1.5
+    }
+
     /// A DEFIED verdict from the synchronous phase-5 readback is a false
     /// positive for apps that apply AX geometry writes asynchronously
     /// (Gecko once its a11y engine has engaged — even with
@@ -266,20 +327,14 @@ final class CommandExecutor {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 500_000_000)
             let tHash = TitleHash.hash(windowId: windowId, pid: pid)
-            let wantStr = "want=(\(fmtCoord(want.origin.x)),"
-                        + "\(fmtCoord(want.origin.y)),"
-                        + "\(fmtCoord(want.width)),"
-                        + "\(fmtCoord(want.height))) graceMs=500"
+            let wantStr = "want=\(fmtRect(want)) graceMs=500"
             guard let actual = SkyLight.shared.getWindowBounds(windowId) else {
                 FrameLog.emit(source: .reverified, windowId: windowId,
                               pid: pid, tHash: tHash, result: "no-bounds",
                               extra: wantStr)
                 return
             }
-            let obeyed = abs(actual.origin.x - want.origin.x) < 1.5
-                      && abs(actual.origin.y - want.origin.y) < 1.5
-                      && abs(actual.width - want.width) < 1.5
-                      && abs(actual.height - want.height) < 1.5
+            let obeyed = framesMatch(actual, want)
             FrameLog.emit(
                 source: .reverified,
                 windowId: windowId, pid: pid, rect: actual, tHash: tHash,
