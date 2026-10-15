@@ -655,14 +655,7 @@ handleEvent debug cfg hotkeyIdMap evt = do
             let wr = WindowRef wid pid
             when (W.member wr ws) $ windows (W.focusWindow wr)
 
-        FrontAppChanged pid -> do
-            handleFrontAppChanged pid
-            -- The first front-app change after a native-fullscreen Space
-            -- transition is the earliest reliable moment to heal the silent
-            -- un-park sweep (see WindowFrameChanged above) — the sweep
-            -- itself emits nothing. Idempotent-cheap: mcmonad-core skips
-            -- windows already at the park corner.
-            reassertHiddenWindows
+        FrontAppChanged pid -> handleFrontAppChanged pid
 
         MouseEnteredWindow wid pid ->
             when (focusFollowsMouse cfg) $ do
@@ -925,6 +918,17 @@ handleFrontAppChanged pid = do
                 -- workspace on screen if so.
                 whenJust (find (\w -> wrPid w == pid) (W.allWindows ws)) $
                     windows . W.focusWindow
+        -- The first front-app change after a native-fullscreen Space
+        -- transition is the earliest reliable moment to heal the silent
+        -- un-park sweep (see the WindowFrameChanged handler) — the sweep
+        -- itself emits nothing. Only reached on a genuine external app
+        -- switch (the echo of mcmonad's own focus command short-circuits
+        -- above), so this no longer fires on every ordinary switch: one
+        -- that already just ran its own hide pass a moment earlier, whose
+        -- windows have not always finished settling into their parked
+        -- frame yet, making the "already parked" skip in executeHideWindows
+        -- miss and re-send a real, visible second park sweep for no reason.
+        reassertHiddenWindows
 
 -- ---------------------------------------------------------------------------
 -- Helpers
