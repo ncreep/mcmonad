@@ -12,6 +12,8 @@ module MCMonad.Core
     , io, withConnection, withWindowSet
       -- * Re-exports for convenience
     , gets, modify, asks, MonadIO(..)
+      -- * Logging
+    , logTS
       -- * Window and screen types
     , WindowRef(..), ScreenId(..), ScreenDetail(..)
       -- * Screen roles and affinity rules (see "MCMonad.Affinity")
@@ -72,14 +74,29 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime)
+import Data.Time.Format (formatTime, defaultTimeLocale)
+import Data.Time.LocalTime (getZonedTime)
 import Data.Typeable (Typeable, cast)
 import Data.Word (Word8, Word32)
 import GHC.Generics (Generic)
-import System.IO (Handle)
+import System.IO (Handle, hPutStrLn, stderr)
 import Text.Read (Lexeme(..), Read(..), ReadPrec, lexP, parens, (+++))
 import qualified XMonad.Core as XMonad
 import qualified XMonad.Layout as XMonad (Resize(..), IncMasterN(..), ChangeLayout(..))
 import qualified XMonad.StackSet as W
+
+-- ---------------------------------------------------------------------------
+-- Logging
+
+-- | Write a line to stderr prefixed with a millisecond timestamp. A
+-- drop-in replacement for @hPutStrLn stderr@ so log lines can be
+-- correlated with how much time actually passed between them, not just
+-- their relative order. Uses local time (not UTC) so these timestamps
+-- line up with mcmonad-core's, which are local via Swift's DateFormatter.
+logTS :: String -> IO ()
+logTS msg = do
+    t <- getZonedTime
+    hPutStrLn stderr (formatTime defaultTimeLocale "%H:%M:%S%3Q " t ++ msg)
 
 -- ---------------------------------------------------------------------------
 -- Window identifier for macOS

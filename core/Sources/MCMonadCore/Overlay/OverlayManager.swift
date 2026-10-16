@@ -72,8 +72,8 @@ final class OverlayManager {
         // this cache, so an empty list here explains an empty picker.
         let wc = snapshot.screens.reduce(0) { $0 + $1.windows.count }
             + snapshot.hiddenWorkspaces.reduce(0) { $0 + $1.windows.count }
-        fputs("OVERLAY: apply screens=\(snapshot.screens.count) "
-            + "hidden=\(snapshot.hiddenWorkspaces.count) windows=\(wc)\n", stderr)
+        logStderr("OVERLAY: apply screens=\(snapshot.screens.count) "
+            + "hidden=\(snapshot.hiddenWorkspaces.count) windows=\(wc)\n")
         onSnapshotApplied?(snapshot)
         snapshotBox.set(snapshot)
         guard enabled else { return }

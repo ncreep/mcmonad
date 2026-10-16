@@ -102,7 +102,7 @@ import System.Directory (doesFileExist, getHomeDirectory, createDirectoryIfMissi
 import System.Environment (getExecutablePath, lookupEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory)
-import System.IO (hPutStrLn, readFile', stderr)
+import System.IO (readFile')
 import System.IO.Error (isPermissionError)
 import System.Info (arch, os)
 import qualified System.Posix.Files as Posix
@@ -219,7 +219,7 @@ windows f = do
     let visibleChanged = S.fromList newVisible /= prevMapped
         toHide = filter (\w -> w `notElem` newVisible && not (S.member w stickySet))
                         (allManagedWindows currentAfterSticky)
-    io $ hPutStrLn stderr $ "WINDOWS: visibleChanged=" ++ show visibleChanged
+    io $ logTS $ "WINDOWS: visibleChanged=" ++ show visibleChanged
         ++ " newVisible=" ++ show (length newVisible)
         ++ " toHide=" ++ show (map wrWindowId toHide)
 
@@ -297,7 +297,7 @@ windows f = do
                            , Just r <- [M.lookup w nativeFloatLastKnown] ]
         allPositions = allRects ++ floatRects
         frames = map toFrameAssignment (allPositions ++ restoredNatives)
-    io $ hPutStrLn stderr $ "FRAMES: " ++ show [(wrWindowId w, rect_x r, rect_y r, rect_w r, rect_h r) | (w, r) <- allPositions]
+    io $ logTS $ "FRAMES: " ++ show [(wrWindowId w, rect_x r, rect_y r, rect_w r, rect_h r) | (w, r) <- allPositions]
     unless (null frames) $ do
         -- A new layout decision for these windows voids any earlier repair.
         modify $ \s -> s { frameRepairs = foldr (M.delete . faWindowId) (frameRepairs s) frames }
@@ -517,10 +517,16 @@ repairFrame wid pid want actual = do
     let attempts = maybe 0 frAttempts (M.lookup wid reps)
         keep r = modify $ \s -> s { frameRepairs = M.insert wid r (frameRepairs s) }
     case repairStep want actual attempts of
-        RepairForget -> modify $ \s -> s { frameRepairs = M.delete wid (frameRepairs s) }
-        RepairDone -> return ()
+        RepairForget -> do
+            modify $ \s -> s { frameRepairs = M.delete wid (frameRepairs s) }
+            when (attempts > 0) $
+                io $ logTS $ "REPAIR: " ++ show wid ++ " settled after "
+                           ++ show attempts ++ " attempt(s)"
+        RepairDone ->
+            io $ logTS $ "REPAIR: " ++ show wid ++ " still off after "
+                       ++ show attempts ++ " attempt(s); giving up"
         RepairResend -> do
-            io $ hPutStrLn stderr $ "REPAIR: re-sending frame for " ++ show wid
+            io $ logTS $ "REPAIR: re-sending frame for " ++ show wid
             windows id
             -- 'windows' clears any tracking entry for a window it just sent
             -- a frame for, so the attempt count is kept *after* it runs,
@@ -940,7 +946,7 @@ recordIfIgnored :: WindowRef -> WindowSet -> M ()
 recordIfIgnored wr finalWs =
     when (not (W.member wr finalWs)) $ do
         modify $ \s -> s { ignoredWindows = S.insert wr (ignoredWindows s) }
-        io $ hPutStrLn stderr $ "IGNORED: added " ++ show wr
+        io $ logTS $ "IGNORED: added " ++ show wr
 
 -- | Insert a window into the StackSet without triggering layout.
 -- Used during startup to batch-insert all existing windows.
@@ -988,7 +994,7 @@ restorePending wi = do
                         , windowMetadata = M.insert wr (metadataFromInfo wi)
                                                        (windowMetadata s)
                         }
-                    io $ hPutStrLn stderr $
+                    io $ logTS $
                         "mcmonad: window " ++ show (wiWindowId wi)
                         ++ " (pid " ++ show (wiPid wi)
                         ++ ") enumerated late; restored to workspace "
@@ -1029,7 +1035,7 @@ unmanage w = do
             , windowMetadata = M.delete w (windowMetadata s)
             }
         -- Logs each removal from 'ignoredWindows'.
-        io $ hPutStrLn stderr $ "IGNORED: removed " ++ show w ++ " (destroyed)"
+        io $ logTS $ "IGNORED: removed " ++ show w ++ " (destroyed)"
     when (W.member w ws) $ do
         -- Remember where the pid's LAST window lived so 'manage' can
         -- route a destroy/recreate replacement (Gecko's fullscreen
@@ -1304,7 +1310,7 @@ journalTimer event extra = io $ do
         createDirectoryIfMissing True (takeDirectory f)
         LBS.appendFile f line)
         `catch` \e ->
-            hPutStrLn stderr $ "mcmonad: timer journal write failed: "
+            logTS $ "mcmonad: timer journal write failed: "
                 ++ show (e :: IOException)
 
 -- | Common identity fields shared by most journal events.
@@ -1389,7 +1395,7 @@ saveStateIO snap = do
         Posix.setFileMode tmp 0o600
         Posix.rename tmp sf)
         `catch` \e ->
-            hPutStrLn stderr $ "mcmonad: state save failed: " ++ show (e :: IOException)
+            logTS $ "mcmonad: state save failed: " ++ show (e :: IOException)
 
 -- | Read the saved state from disk, if any. Returns 'Nothing' when:
 --
@@ -1418,18 +1424,18 @@ loadStateIO = do
             case reads contents of
                 [(saved, _)]
                     | ssVersion saved `elem` [3, persistenceVersion] -> do
-                        hPutStrLn stderr $
+                        logTS $
                             "mcmonad: loaded saved state from " ++ sf
                         keepPrevious sf contents
                         return (Just saved)
                 _ -> do
-                    hPutStrLn stderr $
+                    logTS $
                         "mcmonad: saved state at " ++ sf
                         ++ " is unreadable or has wrong version; moving to .bak"
                     Posix.rename sf (sf ++ ".bak")
                     return Nothing)
             `catch` \e -> do
-                hPutStrLn stderr $
+                logTS $
                     "mcmonad: state load failed: " ++ show (e :: IOException)
                 return Nothing
   where
@@ -1440,7 +1446,7 @@ loadStateIO = do
             Posix.setFileMode tmp 0o600
             Posix.rename tmp prev)
             `catch` \e ->
-                hPutStrLn stderr $ "mcmonad: could not keep " ++ prev
+                logTS $ "mcmonad: could not keep " ++ prev
                     ++ ": " ++ show (e :: IOException)
 
 -- | Is a process with this pid still running?
@@ -1491,7 +1497,7 @@ recompile = do
             mGhc <- lookupEnv "MCMONAD_GHC"
             case mGhc of
                 Nothing -> do
-                    hPutStrLn stderr $ unlines
+                    logTS $ unlines
                         [ "mcmonad: MCMONAD_GHC is not set."
                         , "  Set MCMONAD_GHC to a ghc that has the mcmonad library"
                         , "  in its package database. The home-manager module and"
@@ -1500,7 +1506,7 @@ recompile = do
                     return False
                 Just ghc -> do
                     bin <- getCustomBinary
-                    hPutStrLn stderr $ "mcmonad: recompiling " ++ src ++ " with " ++ ghc
+                    logTS $ "mcmonad: recompiling " ++ src ++ " with " ++ ghc
                     (exit, _, err) <- readProcessWithExitCode ghc
                         ["--make", src, "-o", bin, "-v0"] ""
                     case exit of
@@ -1512,10 +1518,10 @@ recompile = do
                             -- prevents the crash-loop when the IPC has moved
                             -- on but the user's Mod-q-compiled binary hasn't.
                             writeFile (bin ++ ".proto") (show protocolVersion)
-                            hPutStrLn stderr "mcmonad: recompile succeeded"
+                            logTS "mcmonad: recompile succeeded"
                             return True
                         _ -> do
-                            hPutStrLn stderr $ "mcmonad: recompile FAILED:\n" ++ err
+                            logTS $ "mcmonad: recompile FAILED:\n" ++ err
                             return False
 
 -- | Recompile and restart the Haskell process.  The Swift daemon stays
@@ -1535,11 +1541,11 @@ restart = do
     io $ do
         sf <- getStateFile
         saveStateIO snap
-        hPutStrLn stderr $ "mcmonad: state written to " ++ sf
+        logTS $ "mcmonad: state written to " ++ sf
 
     -- 2. Recompile
     ok <- io recompile
-    unless ok $ io $ hPutStrLn stderr "mcmonad: recompile failed, restarting with old binary"
+    unless ok $ io $ logTS "mcmonad: recompile failed, restarting with old binary"
 
     -- 3. Determine which binary to exec.
     --    Use the custom binary only when its protocol-version stamp
@@ -1554,10 +1560,10 @@ restart = do
         self <- getExecutablePath
         let bin = if hasCustom && customStampOk then customBin else self
         when (hasCustom && not customStampOk) $
-            hPutStrLn stderr $
+            logTS $
                 "mcmonad: custom binary " ++ customBin
                 ++ " has missing/mismatched protocol stamp; using bundled"
-        hPutStrLn stderr $ "mcmonad: exec " ++ bin ++ " --resume"
+        logTS $ "mcmonad: exec " ++ bin ++ " --resume"
         executeFile bin False ["--resume"] Nothing
   where
     checkProtoStamp customBin = do
@@ -1605,7 +1611,7 @@ rescreen newScreens = do
         roles'     = M.fromList (zipWith (\i si -> (S i, siRole si))
                                          [0 :: Int ..] newScreens)
         liveSids   = S.fromList (map fst newDetails)
-    io $ hPutStrLn stderr $ "mcmonad: screens "
+    io $ logTS $ "mcmonad: screens "
         ++ unwords [ show i ++ "=" ++ roleName (siRole si)
                    | (i, si) <- zip [0 :: Int ..] newScreens ]
     case reassignScreens newDetails ws of

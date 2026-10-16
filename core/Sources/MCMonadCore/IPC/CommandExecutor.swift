@@ -102,7 +102,7 @@ final class CommandExecutor {
         // Keep the legacy "CMD: set-frames count=N" line so prior log
         // analysis tools still grep cleanly. Detailed per-assignment
         // events come through FrameLog below.
-        fputs("CMD: set-frames count=\(frames.count)\n", stderr)
+        logStderr("CMD: set-frames count=\(frames.count)\n")
         FrameLog.emit(source: .cmdSetFramesBegin, extra: "count=\(frames.count)")
         let skylight = SkyLight.shared
 
@@ -364,9 +364,9 @@ final class CommandExecutor {
                 let retry = windowInfos.isEmpty
                     && attempt <= Self.emptyEnumerationRetries
                 let verdict = retry ? "retry" : (windowInfos.isEmpty ? "empty" : "ok")
-                fputs("ENUM: attempt=\(attempt) skylight=\(seen) "
+                logStderr("ENUM: attempt=\(attempt) skylight=\(seen) "
                       + "ax-ok=\(windowInfos.count) ax-fail=\(seen - windowInfos.count) "
-                      + "result=\(verdict)\n", stderr)
+                      + "result=\(verdict)\n")
                 if retry {
                     try? await Task.sleep(nanoseconds: Self.emptyEnumerationRetryInterval)
                     continue
@@ -432,7 +432,7 @@ final class CommandExecutor {
     }
 
     private func executeHideWindows(_ windowIds: [UInt32]) {
-        fputs("CMD: hide-windows ids=\(windowIds)\n", stderr)
+        logStderr("CMD: hide-windows ids=\(windowIds)\n")
         guard !windowIds.isEmpty else { return }
 
         let allScreens = displayManager.currentScreens()
@@ -509,7 +509,7 @@ final class CommandExecutor {
     }
 
     private func executeShowWindows(_ windowIds: [UInt32]) {
-        fputs("CMD: show-windows ids=\(windowIds)\n", stderr)
+        logStderr("CMD: show-windows ids=\(windowIds)\n")
         // SetFrames follows immediately and repositions windows correctly.
     }
 }

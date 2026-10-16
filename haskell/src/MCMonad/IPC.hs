@@ -48,9 +48,9 @@ import GHC.Generics (Generic)
 import Network.Socket
 import System.Directory (getHomeDirectory)
 import System.FilePath ((</>))
-import System.IO (hSetBuffering, BufferMode(..), hFlush, hPutStrLn, hReady, IOMode(..), stderr)
+import System.IO (hSetBuffering, BufferMode(..), hFlush, hReady, IOMode(..))
 
-import MCMonad.Core (Connection(..), Rectangle(..), WindowMetadata(..), Timer(..), ScreenRole, parseRole)
+import MCMonad.Core (Connection(..), Rectangle(..), WindowMetadata(..), Timer(..), ScreenRole, parseRole, logTS)
 
 -- ---------------------------------------------------------------------------
 -- Protocol version
@@ -517,7 +517,7 @@ connectToCore = do
         case result of
             Right conn -> return conn
             Left err   -> do
-                hPutStrLn stderr $
+                logTS $
                     "mcmonad: waiting for core socket (" ++ show err ++ "), retrying in "
                     ++ show (delay `div` 1000000) ++ "s"
                 threadDelay delay

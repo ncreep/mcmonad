@@ -84,7 +84,7 @@ final class EventBridge: SkyLightEventDelegate {
     /// Register a managed window. Starts AX focus tracking for the PID on
     /// the first window of that PID.
     private func addManagedWindow(windowId: UInt32, pid: pid_t) {
-        fputs("DEBUG: addManagedWindow wid=\(windowId) pid=\(pid) alreadyIn=\(managedWindowIds.contains(windowId)) setSizeBefore=\(managedWindowIds.count)\n", stderr)
+        logStderr("DEBUG: addManagedWindow wid=\(windowId) pid=\(pid) alreadyIn=\(managedWindowIds.contains(windowId)) setSizeBefore=\(managedWindowIds.count)\n")
         managedWindowIds.insert(windowId)
         windowIdToPid[windowId] = pid
         let wasEmpty = (pidWindowIds[pid]?.isEmpty ?? true)
@@ -97,7 +97,7 @@ final class EventBridge: SkyLightEventDelegate {
     /// Unregister a managed window. Stops AX focus tracking for the PID
     /// once the last window of that PID is gone.
     private func removeManagedWindow(windowId: UInt32) {
-        fputs("DEBUG: removeManagedWindow wid=\(windowId) wasIn=\(managedWindowIds.contains(windowId)) setSizeBefore=\(managedWindowIds.count)\n", stderr)
+        logStderr("DEBUG: removeManagedWindow wid=\(windowId) wasIn=\(managedWindowIds.contains(windowId)) setSizeBefore=\(managedWindowIds.count)\n")
         managedWindowIds.remove(windowId)
         guard let pid = windowIdToPid.removeValue(forKey: windowId) else { return }
         if var wids = pidWindowIds[pid] {
@@ -188,7 +188,7 @@ final class EventBridge: SkyLightEventDelegate {
         rejectedWindowIds.removeValue(forKey: wid)
         ineligibleStreak.removeValue(forKey: wid)
         socketServer.send(.windowDestroyed(windowId: wid))
-        fputs("RECONCILE: retire wid=\(wid) pid=\(pid) reason=\(reason)\n", stderr)
+        logStderr("RECONCILE: retire wid=\(wid) pid=\(pid) reason=\(reason)\n")
     }
 
     /// Report any manageable window the brain has never heard about.
@@ -249,10 +249,9 @@ final class EventBridge: SkyLightEventDelegate {
         if viaSweep {
             // Should be rare. A run of these means windows are being lost
             // somewhere upstream and the sweep is papering over it.
-            fputs(
+            logStderr(
                 "RECONCILE: adopt wid=\(snap.windowId) pid=\(snap.pid) "
-                    + "tHash=\(TitleHash.hash(windowId: snap.windowId, pid: snap.pid))\n",
-                stderr
+                    + "tHash=\(TitleHash.hash(windowId: snap.windowId, pid: snap.pid))\n"
             )
         }
     }
@@ -282,7 +281,7 @@ final class EventBridge: SkyLightEventDelegate {
             // knows about, so a window already in `managedWindowIds` is
             // left alone.
             guard !managedWindowIds.contains(windowId) else {
-                fputs("DEBUG: skyLightEvent .created wid=\(windowId) ignored (already managed)\n", stderr)
+                logStderr("DEBUG: skyLightEvent .created wid=\(windowId) ignored (already managed)\n")
                 break
             }
             if let snap = SkyLightQuery.queryWindow(windowId) {
@@ -291,7 +290,7 @@ final class EventBridge: SkyLightEventDelegate {
 
         case .destroyed(let windowId, let spaceId):
             let stillExists = SkyLightQuery.windowExists(windowId)
-            fputs("DEBUG: skyLightEvent .destroyed wid=\(windowId) spaceId=\(spaceId) wasManaged=\(managedWindowIds.contains(windowId)) stillExists=\(stillExists)\n", stderr)
+            logStderr("DEBUG: skyLightEvent .destroyed wid=\(windowId) spaceId=\(spaceId) wasManaged=\(managedWindowIds.contains(windowId)) stillExists=\(stillExists)\n")
             // A destroy notification can be spurious — SkyLight fires one
             // for a window that's still alive, most commonly around a
             // cross-screen AX move. Trusting it blindly means unmanaging a
@@ -302,7 +301,7 @@ final class EventBridge: SkyLightEventDelegate {
             // causes focus to jump. Verify liveness first, the same way
             // `validateWindows` already does for its own check.
             guard !isSpuriousDestroy(windowId, stillExists: stillExists) else {
-                fputs("DEBUG: skyLightEvent .destroyed wid=\(windowId) ignored (spurious, still exists)\n", stderr)
+                logStderr("DEBUG: skyLightEvent .destroyed wid=\(windowId) ignored (spurious, still exists)\n")
                 break
             }
             removeManagedWindow(windowId: windowId)
@@ -313,9 +312,9 @@ final class EventBridge: SkyLightEventDelegate {
 
         case .closed(let windowId):
             let stillExists = SkyLightQuery.windowExists(windowId)
-            fputs("DEBUG: skyLightEvent .closed wid=\(windowId) wasManaged=\(managedWindowIds.contains(windowId)) stillExists=\(stillExists)\n", stderr)
+            logStderr("DEBUG: skyLightEvent .closed wid=\(windowId) wasManaged=\(managedWindowIds.contains(windowId)) stillExists=\(stillExists)\n")
             guard !isSpuriousDestroy(windowId, stillExists: stillExists) else {
-                fputs("DEBUG: skyLightEvent .closed wid=\(windowId) ignored (spurious, still exists)\n", stderr)
+                logStderr("DEBUG: skyLightEvent .closed wid=\(windowId) ignored (spurious, still exists)\n")
                 break
             }
             removeManagedWindow(windowId: windowId)
@@ -783,7 +782,7 @@ struct MCMonadCoreApp {
 
         logger.info("mcmonad-core fully initialized")
         for line in PermissionAudit.take() {
-            fputs("PERMS: \(line.label)=\(line.value)\n", stderr)
+            logStderr("PERMS: \(line.label)=\(line.value)\n")
         }
 
         // Keep references alive for the lifetime of the process
@@ -894,7 +893,7 @@ struct MCMonadCoreApp {
     private static func showNonFatalAlert(title: String, body: String) {
         let msg = "\(title)\n\(body)"
         logger.fault("\(msg, privacy: .public)")
-        fputs("mcmonad-core: \(msg)\n", stderr)
+        logStderr("mcmonad-core: \(msg)\n")
 
         NSApplication.shared.activate(ignoringOtherApps: true)
         let alert = NSAlert()
@@ -923,7 +922,7 @@ struct MCMonadCoreApp {
     ) -> Never {
         let stderrMsg = "\(title)\n\(body)"
         logger.fault("\(stderrMsg, privacy: .public)")
-        fputs("mcmonad-core: \(stderrMsg)\n", stderr)
+        logStderr("mcmonad-core: \(stderrMsg)\n")
 
         // NSApp/NSAlert are MainActor-isolated. main() is the program
         // entry point, so we are on the main thread, but the compiler

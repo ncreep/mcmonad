@@ -19,7 +19,6 @@ import Data.Word (Word32)
 import Data.Time.Clock (getCurrentTime)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode(..), exitSuccess)
-import System.IO (hPutStrLn, stderr)
 import System.Posix.Signals (Handler(..), installHandler, sigINT, sigTERM)
 import qualified XMonad.StackSet as W
 
@@ -92,7 +91,7 @@ launch cfg = do
 
     -- 6. Check debug mode
     debug <- maybe False (const True) <$> lookupEnv "MCMONAD_DEBUG"
-    when debug $ hPutStrLn stderr "mcmonad: debug logging enabled (MCMONAD_DEBUG)"
+    when debug $ logTS "mcmonad: debug logging enabled (MCMONAD_DEBUG)"
 
     -- 7. Try to restore from the persisted snapshot. This runs on
     --    EVERY startup (not just --resume), so windows return to
@@ -125,7 +124,7 @@ launch cfg = do
             Classic -> rsWindowSet restored
         unmatchedLives = rsUnmatched restored
 
-    hPutStrLn stderr $ "mcmonad: screens "
+    logTS $ "mcmonad: screens "
         ++ unwords [ show i ++ "=" ++ roleName (siRole si) | (i, si) <- zip [0 :: Int ..] screens ]
         ++ (case viewMode cfg of Affine -> " (affine)"; Classic -> " (classic)")
 
@@ -228,7 +227,7 @@ flushSnapshot ref = do
         Nothing   -> return ()
         Just snap -> do
             saveStateIO snap
-            hPutStrLn stderr "mcmonad: final state written"
+            logTS "mcmonad: final state written"
 
 -- | What 'restoreSnapshot' rebuilds from the saved state.
 data Restored = Restored
@@ -314,7 +313,7 @@ restoreSnapshot cfg screens existingWindows = do
             let alive w  = Map.findWithDefault False (wrPid w) liveness
                 pending  = Map.filterWithKey (\w _ -> alive w) absent
                 dead     = Map.size absent - Map.size pending
-            hPutStrLn stderr $
+            logTS $
                 "mcmonad: restored "
                 ++ show (length (W.allWindows ws))
                 ++ " window(s); " ++ show (Map.size pending)
@@ -322,7 +321,7 @@ restoreSnapshot cfg screens existingWindows = do
                 ++ show dead ++ " dead (process gone); "
                 ++ show (length unmatched) ++ " new"
             when (null (W.allWindows ws) && not (Map.null pending)) $
-                hPutStrLn stderr
+                logTS
                     "mcmonad: the daemon enumerated none of the saved \
                     \windows; holding every placement until they are reported"
             return $ Just Restored
@@ -520,7 +519,7 @@ shouldFollowIntoHidden onHidden isFrontmostApp = onHidden && isFrontmostApp
 -- | Dispatch a single event from the Swift daemon.
 handleEvent :: Bool -> MConfig Layout -> Map.Map Int (M ()) -> Event -> M ()
 handleEvent debug cfg hotkeyIdMap evt = do
-    when debug $ io $ hPutStrLn stderr $ "EVENT: " ++ show evt
+    when debug $ io $ logTS $ "EVENT: " ++ show evt
     case evt of
         WindowCreated winfo -> do
             -- A saved window the daemon is only reporting now goes back
@@ -786,7 +785,7 @@ handleEvent debug cfg hotkeyIdMap evt = do
             -- mcmonad-core; the launcher's protocol-version stamp
             -- check should normally prevent that pairing, but this
             -- is the defence-in-depth.
-            io $ hPutStrLn stderr $
+            io $ logTS $
                 "mcmonad: ignoring unknown wire message: " ++ T.unpack name
 
 -- ---------------------------------------------------------------------------
