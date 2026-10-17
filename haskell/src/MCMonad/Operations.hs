@@ -1167,11 +1167,26 @@ sendMessageWithNoRefresh m = do
 -- ---------------------------------------------------------------------------
 -- Window actions
 
--- | Close the focused window by asking the Swift daemon to close it.
+-- | Close whatever window macOS currently has focused, not just a
+-- 'windowset' member: a 'MCMonad.ManageHook.doIgnore'd window (e.g.
+-- System Settings) is never in 'windowset', so 'withFocused' would
+-- silently do nothing while one is focused. Asynchronous, same as
+-- 'jumpToActiveWindow' — the close happens when
+-- 'MCMonad.IPC.FocusedWindowQueryResponse' arrives.
 kill :: M ()
-kill = withFocused $ \w -> do
+kill = queryFocusedWindow $ \w -> do
     conn <- asks connection
     io $ sendCommand conn (CloseWindow (wrWindowId w) (wrPid w))
+
+-- | Fetch the window macOS currently has focused and run an action on it,
+-- bypassing 'windowset' (see 'kill'). Asynchronous: only sends the query
+-- here, @f@ runs later when 'MCMonad.IPC.FocusedWindowQueryResponse'
+-- arrives — see the handler in "MCMonad.Main".
+queryFocusedWindow :: (WindowRef -> M ()) -> M ()
+queryFocusedWindow f = do
+    modify $ \s -> s { pendingFocusQuery = Just f }
+    conn <- asks connection
+    io $ sendCommand conn QueryFocusedWindow
 
 -- | Perform an action on the focused window, if there is one.
 withFocused :: (WindowRef -> M ()) -> M ()
@@ -1196,15 +1211,12 @@ setFocus w = do
 -- whose window sits on an off-screen workspace: mcmonad's StackSet focus
 -- does not follow such activations (the AX\/NSWorkspace resolve helpers
 -- only act on the current workspace), so we ask the daemon where focus
--- actually landed and follow it.
---
--- Asynchronous: this only fires the 'QueryFocusedWindow' query. The
--- actual workspace switch happens when the 'FocusedWindowQueryResponse'
--- event arrives — see the handler in "MCMonad.Main".
+-- actually landed and follow it. See 'queryFocusedWindow' for the
+-- asynchronous mechanics.
 jumpToActiveWindow :: M ()
-jumpToActiveWindow = do
-    conn <- asks connection
-    io $ sendCommand conn QueryFocusedWindow
+jumpToActiveWindow = queryFocusedWindow $ \wr -> do
+    ws <- gets windowset
+    when (W.member wr ws) $ windows (W.focusWindow wr)
 
 -- | Open the fuzzy window-search dropdown. The daemon owns the picker
 -- UI; a selection returns as a 'MCMonad.IPC.MenuFocusWindow' event,

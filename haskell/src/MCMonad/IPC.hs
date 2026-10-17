@@ -87,12 +87,13 @@ data Command
     | QueryFocusedWindow
       -- ^ Ask the daemon which window macOS currently considers focused
       -- (the frontmost app's AX focused window). Answered asynchronously
-      -- with a 'FocusedWindowQueryResponse' event. Used by the
-      -- "jump to the active window's workspace" hotkey: after a Dock
-      -- click activates an app whose window lives on an off-screen
-      -- workspace, mcmonad's StackSet focus has not followed (the
-      -- resolve* helpers only act on the current workspace), so we have
-      -- to ask macOS where focus actually is.
+      -- with a 'FocusedWindowQueryResponse' event. Used whenever a caller
+      -- needs the real focused window rather than mcmonad's own
+      -- 'MCMonad.Core.MState.windowset' -- e.g. the "jump to the active
+      -- window's workspace" hotkey (StackSet focus does not follow a Dock
+      -- click into an off-screen workspace) and closing the focused
+      -- window (a 'MCMonad.ManageHook.doIgnore'd window is never a
+      -- 'windowset' member at all).
     | ShowWindowPicker
       -- ^ Ask the daemon to open the fuzzy window-search dropdown. The
       -- daemon owns the UI; selection comes back as a 'MenuFocusWindow'

@@ -170,6 +170,7 @@ launch cfg = do
                        , nextTimerId = rsNextTimerId restored
                        , focusIntent = Nothing
                        , frontmostPid = Nothing
+                       , pendingFocusQuery = Nothing
                        , unmanagedOrigin = Map.empty
                        , reclaimOrigin  = Map.empty
                        , pendingRestore = rsPending restored
@@ -644,15 +645,14 @@ handleEvent debug cfg hotkeyIdMap evt = do
                 _ -> return ()
 
         FocusedWindowQueryResponse wid pid -> do
-            -- Answer to our own 'QueryFocusedWindow' (the Mod-Cmd-Shift-J
-            -- "jump to the active window's workspace" hotkey). The window
-            -- may be on any workspace, including a hidden one or the other
-            -- screen; 'W.focusWindow' brings its workspace to the current
-            -- screen and focuses it. Bypasses the 'focusIntent' dispatch
-            -- entirely — this is a direct, user-requested jump.
-            ws <- gets windowset
-            let wr = WindowRef wid pid
-            when (W.member wr ws) $ windows (W.focusWindow wr)
+            -- Answer to our own 'QueryFocusedWindow'; run whatever the
+            -- caller (e.g. 'MCMonad.Operations.jumpToActiveWindow' or
+            -- 'MCMonad.Operations.kill') queued for it, bypassing the
+            -- 'focusIntent' dispatch entirely — this is a direct,
+            -- user-requested action on the real focused window.
+            pending <- gets pendingFocusQuery
+            modify $ \s -> s { pendingFocusQuery = Nothing }
+            whenJust pending ($ WindowRef wid pid)
 
         FrontAppChanged pid -> handleFrontAppChanged pid
 

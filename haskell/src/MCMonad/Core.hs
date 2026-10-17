@@ -565,6 +565,13 @@ data MState = MState
       -- to tell a genuine app switch from AX re-announcing an app's
       -- window that isn't actually in front (see 'FocusedWindowChanged'
       -- in "MCMonad.Main").
+    , pendingFocusQuery :: !(Maybe (WindowRef -> M ()))
+      -- ^ Continuation for the next 'MCMonad.IPC.FocusedWindowQueryResponse'.
+      -- Set right before sending 'MCMonad.IPC.QueryFocusedWindow', run and
+      -- cleared by the response handler in "MCMonad.Main". Needed by
+      -- callers that want the window macOS actually has focused rather
+      -- than 'windowset', which omits 'MCMonad.ManageHook.doIgnore'd
+      -- windows entirely.
     , unmanagedOrigin  :: !(Map.Map Int32 (String, UTCTime))
       -- ^ pid → (workspace tag, time) of the pid's most recently
       -- destroyed *last* window. Some apps (Gecko\/LibreWolf) destroy
