@@ -91,6 +91,8 @@ final class CommandExecutor {
             onSetTimers?(timers)
         case .setOcrIndex(let on):
             onSetOcrIndex?(on)
+        case .ignoredAttributionReply(let screenFrame, let windowIds):
+            IgnoredAttributionWaiters.shared.deliver(screenFrame: screenFrame, windowIds: windowIds)
         }
     }
 

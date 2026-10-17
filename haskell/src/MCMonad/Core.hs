@@ -463,6 +463,17 @@ data MState = MState
       -- ^ Whether to draw debug frame overlays. Off by default. Toggled
       -- by 'MCMonad.Debug.toggleDebugOverlays' (either from xmonad.hs
       -- or the menubar's "Debug frame overlays" item).
+    , ignoredWindows   :: !(Set WindowRef)
+      -- ^ Windows the manage hook explicitly 'MCMonad.ManageHook.doIgnore'd:
+      -- present in 'windowMetadata' but deliberately absent from
+      -- 'windowset', since mcmonad never positions or tracks them.
+      -- Tracked separately so a query for "what's on this screen" (e.g.
+      -- AltTab's per-screen filter) can still attribute them to whichever
+      -- screen they physically sit on — mcmonad-core resolves their live
+      -- AX frame on demand, since this state only ever carries identity.
+      -- Added in 'MCMonad.Operations.manage' \/ 'manageSilent' when the
+      -- post-hook 'windowset' doesn't contain the window; removed in
+      -- 'MCMonad.Operations.unmanage'.
     , lastSaveAt       :: !(Maybe UTCTime)
       -- ^ Wall clock of the most recent 'MCMonad.Operations.saveStateIO'
       -- call. The 'windows' transition skips its post-mutation save when

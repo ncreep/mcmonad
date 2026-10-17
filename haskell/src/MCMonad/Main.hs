@@ -161,6 +161,7 @@ launch cfg = do
                        , lastOnRole = Map.empty
                        , windowMetadata = seededMetadata
                        , debugOverlays = False
+                       , ignoredWindows = Set.empty
                        , lastSaveAt = Nothing
                        , timers = rsTimers restored
                        , nextTimerId = rsNextTimerId restored
@@ -464,7 +465,11 @@ handleEvent debug cfg hotkeyIdMap evt = do
         WindowDestroyed wid -> do
             forgetPending wid
             ws <- gets windowset
-            let mref = findByWindowId wid (W.allWindows ws)
+            ignored <- gets ignoredWindows
+            -- An ignored window is never in 'W.allWindows', so it has to
+            -- be searched for separately or its destroy is silently
+            -- dropped and 'unmanage' never runs to clear it.
+            let mref = findByWindowId wid (W.allWindows ws ++ Set.toList ignored)
             whenJust mref $ \wref -> unmanage wref
 
         WindowFrameChanged wid rect -> do
@@ -652,6 +657,14 @@ handleEvent debug cfg hotkeyIdMap evt = do
                                      ++ W.hidden ws)
             journalJumped label workspace
             when (workspace `elem` allTags) $ viewWorkspace workspace
+
+        IgnoredAttributionQuery frame facts -> do
+            -- The per-screen query asked where the ignored windows are.
+            -- Swift sent their live frames; the brain answers the attribution.
+            ws <- gets windowset
+            ignored <- gets ignoredWindows
+            let wids = attributeIgnoredWindows ignored ws frame facts
+            withConnection $ \conn -> io $ sendCommand conn (IgnoredAttributionReply frame wids)
 
         -- Events that arrive during init or are not actionable
         Ready                   -> return ()

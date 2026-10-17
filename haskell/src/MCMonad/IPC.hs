@@ -17,9 +17,11 @@ module MCMonad.IPC
     , OverlaySnapshot(..)
     , OverlayScreenEntry(..)
     , OverlayHiddenWorkspace(..)
+    , OverlayIgnoredWindow(..)
     , OverlayWindowEntry(..)
       -- * Event types (Swift -> Haskell)
     , Event(..)
+    , parseIgnoredFact
     , WindowInfo(..)
     , ScreenInfo(..)
       -- * Metadata helpers
@@ -61,7 +63,7 @@ import MCMonad.Core (Connection(..), Rectangle(..), WindowMetadata(..), Timer(..
 -- guard prevents the crash-loop that happens when a Mod-q-compiled
 -- binary lingers across an mcmonad upgrade and speaks the old protocol.
 protocolVersion :: Int
-protocolVersion = 12
+protocolVersion = 13
 
 -- ---------------------------------------------------------------------------
 -- Commands (Haskell -> Swift)
@@ -104,6 +106,10 @@ data Command
       -- ^ Turn the daemon's in-memory OCR index of displayed windows on or
       -- off ('MCMonad.Config.ocrIndex'). Sent once at startup; the text
       -- it gathers never comes back over this socket.
+    | IgnoredAttributionReply !Rectangle [Word32]
+      -- ^ Answer to 'IgnoredAttributionQuery': the ignored windows whose
+      -- home screen is the screen nearest the echoed frame. Matched on
+      -- the Swift side by that frame.
     | SetTimers [Timer]
       -- ^ Authoritative list of running countdown timers. The brain owns
       -- timer state and resends the whole list whenever it changes (and
@@ -142,12 +148,23 @@ data OverlayHiddenWorkspace = OverlayHiddenWorkspace
     , ohwWindows :: ![OverlayWindowEntry]
     } deriving (Show, Generic)
 
+-- | A window the manage hook explicitly ignored (see
+-- 'MCMonad.ManageHook.doIgnore'). mcmonad never positions or hides these,
+-- so there's no frame or workspace tag to report — just identity.
+-- mcmonad-core resolves the live AX frame itself and attributes the
+-- window to whichever screen it's actually sitting on.
+data OverlayIgnoredWindow = OverlayIgnoredWindow
+    { oiwWindowId :: !Word32
+    , oiwPid      :: !Int32
+    } deriving (Show, Generic)
+
 -- | Snapshot of the WindowSet, sent on every 'windows' call. Drives
 -- both the menubar workspace tree and the debug overlay.
 data OverlaySnapshot = OverlaySnapshot
     { osDebugOverlays    :: !Bool
     , osScreens          :: ![OverlayScreenEntry]
     , osHiddenWorkspaces :: ![OverlayHiddenWorkspace]
+    , osIgnoredWindows   :: ![OverlayIgnoredWindow]
     } deriving (Show, Generic)
 
 instance Aeson.ToJSON OverlayWindowEntry where
@@ -178,11 +195,18 @@ instance Aeson.ToJSON OverlayHiddenWorkspace where
         , "windows" .= ohwWindows
         ]
 
+instance Aeson.ToJSON OverlayIgnoredWindow where
+    toJSON OverlayIgnoredWindow{..} = Aeson.object
+        [ "windowId" .= oiwWindowId
+        , "pid"      .= oiwPid
+        ]
+
 instance Aeson.ToJSON OverlaySnapshot where
     toJSON OverlaySnapshot{..} = Aeson.object
         [ "debugOverlays"    .= osDebugOverlays
         , "screens"          .= osScreens
         , "hiddenWorkspaces" .= osHiddenWorkspaces
+        , "ignoredWindows"   .= osIgnoredWindows
         ]
 
 -- | A frame assignment: position a specific window at a specific rectangle.
@@ -281,6 +305,11 @@ instance Aeson.ToJSON Command where
         [ "cmd" .= ("set-ocr-index" :: Text)
         , "on"  .= on
         ]
+    toJSON (IgnoredAttributionReply frame wids) = Aeson.object
+        [ "cmd"         .= ("ignored-attribution-reply" :: Text)
+        , "screenFrame" .= frame
+        , "windowIds"   .= wids
+        ]
 
 -- | Wire encoding of one 'Timer'. 'tmFireAt' is absolute POSIX epoch
 -- seconds so the daemon's countdown matches @Date().timeIntervalSince1970@.
@@ -349,6 +378,11 @@ data Event
       -- origin @workspace@. The brain switches to that workspace and journals
       -- @jumped@. (Distinct from 'MenuViewWorkspace' so the journal can
       -- attribute the switch to a timer.)
+    | IgnoredAttributionQuery !Rectangle [(Word32, Int32, Rectangle)]
+      -- ^ Swift asks where the ignored windows belong: the screen frame
+      -- being queried, and each ignored window's window id, pid and live
+      -- AX frame (windows without a readable frame are left out). A fact
+      -- from Swift; the attribution is computed by the brain.
     | Ready
     | QueryWindowsResponse [WindowInfo]
     | QueryScreensResponse [ScreenInfo]
@@ -412,6 +446,11 @@ instance Aeson.FromJSON ScreenInfo where
         <*> v .: "frame"
         <*> (v .: "role" >>= \s -> maybe (fail ("unknown screen role: " ++ s)) pure (parseRole s))
 
+-- | One ignored window in an 'IgnoredAttributionQuery'.
+parseIgnoredFact :: Aeson.Value -> Aeson.Parser (Word32, Int32, Rectangle)
+parseIgnoredFact = Aeson.withObject "IgnoredFact" $ \v ->
+    (,,) <$> v .: "windowId" <*> v .: "pid" <*> v .: "frame"
+
 instance Aeson.FromJSON Event where
     parseJSON = Aeson.withObject "Event" $ \v -> do
         -- Swift sends events with "event" key and query responses with "response" key
@@ -428,6 +467,7 @@ instance Aeson.FromJSON Event where
                 "focused-window-changed" -> FocusedWindowChanged <$> v .: "windowId" <*> v .: "pid"
                 "focused-window-query-response" -> FocusedWindowQueryResponse <$> v .: "windowId" <*> v .: "pid"
                 "screens-changed"      -> ScreensChanged     <$> v .: "screens"
+                "ignored-attribution-query" -> IgnoredAttributionQuery <$> v .: "screenFrame" <*> (v .: "windows" >>= traverse parseIgnoredFact)
                 "hotkey-pressed"       -> HotkeyPressed      <$> v .: "hotkeyId"
                 "mouse-entered-window" -> MouseEnteredWindow <$> v .: "windowId" <*> v .: "pid"
                 "window-drag-completed" -> WindowDragCompleted <$> v .: "windowId" <*> v .: "pid" <*> v .: "frame"

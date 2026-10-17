@@ -10,10 +10,11 @@ import MCMonad.Core
     , withinSettleWindow, consumeIntent
     , PendingWindow(..), Timer(..), LayoutClass(..)
     )
-import MCMonad.IPC (WindowInfo(..), Command(..), OverlayScreenEntry(..))
+import MCMonad.IPC (WindowInfo(..), Command(..), OverlayScreenEntry(..), OverlayIgnoredWindow(..), parseIgnoredFact)
 import MCMonad.Main (onHiddenWorkspace, shouldFollowIntoHidden)
 import MCMonad.Affinity
 import qualified Data.Aeson as Aeson
+import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy.Char8 as BL
 import MCMonad.Persistence
     ( SerialState(..), SerStack(..), persistenceVersion, serialToWindowSet
@@ -24,6 +25,7 @@ import MCMonad.Operations
     ( frameAtParkCorner, reassignScreens
     , chooseOriginTag, pruneReclaims, reclaimOriginTTL, reclaimOriginCap
     , placeManaged
+    , attributeIgnoredWindows
     )
 import MCMonad.Sway (viewOnScreen)
 import MCMonad.Layout (Full(..))
@@ -1599,6 +1601,14 @@ prop_placeManaged_no_origin_is_hook ss w =
             == W.shiftWin pin w (W.insertUp w ss)
   where tags = map W.tag (W.workspaces ss)
 
+-- An ignored window's identity is on the wire for the per-screen query
+prop_overlayIgnored_wire :: Word32 -> Int32 -> Property
+prop_overlayIgnored_wire wid pid =
+    let json = BL.unpack (Aeson.encode (OverlayIgnoredWindow wid pid))
+    in counterexample json $ property $
+        ("\"windowId\":" ++ show wid) `L.isInfixOf` json && ("\"pid\":" ++ show pid) `L.isInfixOf` json
+
+
 -- A focused window is routed to a hidden workspace exactly when it lives on one
 prop_onHiddenWorkspace_matches_hidden_stacks :: TestStackSet -> WindowRef -> Bool
 prop_onHiddenWorkspace_matches_hidden_stacks ss w =
@@ -1608,6 +1618,37 @@ prop_onHiddenWorkspace_matches_hidden_stacks ss w =
 prop_shouldFollowIntoHidden_requires_both :: Bool -> Bool -> Bool
 prop_shouldFollowIntoHidden_requires_both onHidden isFrontmostApp =
     shouldFollowIntoHidden onHidden isFrontmostApp == (onHidden && isFrontmostApp)
+
+-- Brain-side attribution of ignored windows to the queried screen
+prop_attributeIgnored_home_screen :: Bool
+prop_attributeIgnored_home_screen =
+    attributeIgnoredWindows ignored twoScreenSet rectA facts == [50]
+        && attributeIgnoredWindows ignored twoScreenSet rectB facts == [51]
+  where
+    rectA = screenRect (W.screenDetail (W.current twoScreenSet))
+    rectB = screenRect (W.screenDetail (head (W.visible twoScreenSet)))
+    ignored = Set.fromList [WindowRef 50 1, WindowRef 51 1, WindowRef 52 1]
+    facts =
+        [ (50, 1, Rectangle 100 100 200 200)          -- on the first screen
+        , (51, 1, Rectangle 3500 200 300 300)         -- on the second screen
+        , (52, 1, Rectangle 9000 9000 400 300)        -- parked: overlaps no screen
+        , (53, 1, Rectangle 100 100 200 200)          -- not ignored
+        ]
+
+-- The ignored-window fact survives its JSON form
+prop_ignoredFact_parses_back :: Word32 -> Int32 -> ScreenDetail -> Bool
+prop_ignoredFact_parses_back wid pid (SD r) =
+    let json = "{\"windowId\":" ++ show wid ++ ",\"pid\":" ++ show pid
+            ++ ",\"frame\":" ++ BL.unpack (Aeson.encode r) ++ "}"
+    in (Aeson.decode (BL.pack json) >>= parseMaybe parseIgnoredFact) == Just (wid, pid, r)
+
+-- The reply names the attributed ids under the echoed frame
+prop_ignoredAttributionReply_wire :: [Word32] -> ScreenDetail -> Property
+prop_ignoredAttributionReply_wire wids (SD r) =
+    let json = BL.unpack (Aeson.encode (IgnoredAttributionReply r wids))
+    in counterexample json $ property $
+        "\"cmd\":\"ignored-attribution-reply\"" `L.isInfixOf` json
+        && ("\"windowIds\":[" ++ L.intercalate "," (map show wids) ++ "]") `L.isInfixOf` json
 
 allProperties :: [(String, Property)]
 allProperties =
@@ -1627,6 +1668,7 @@ allProperties =
     , ("affinity: role names round trip", property prop_role_names_round_trip)
     , ("ocr-index wire format", property prop_ocr_index_wire)
     , ("overlay screen wire carries isActive", property prop_overlayScreen_wire_is_active)
+    , ("overlay ignored window wire carries identity", property prop_overlayIgnored_wire)
     , ("timer persistence + legacy snapshot", property prop_timer_persistence)
     , ("invariant",               property prop_invariant)
     , ("focusUp/focusDown",       property prop_focusUp_focusDown)
@@ -1755,4 +1797,8 @@ allProperties =
     , ("placeManaged: no origin defers to hook",        property prop_placeManaged_no_origin_is_hook)
     , ("focus: hidden-workspace window is routed",    property prop_onHiddenWorkspace_matches_hidden_stacks)
     , ("focus: hidden-workspace follow requires frontmost app", property prop_shouldFollowIntoHidden_requires_both)
+
+    , ("ignored: attributed to nearest screen, parked excluded", property prop_attributeIgnored_home_screen)
+    , ("ignored: fact JSON parses back",              property prop_ignoredFact_parses_back)
+    , ("ignored: attribution reply wire format",      property prop_ignoredAttributionReply_wire)
     ]

@@ -18,6 +18,7 @@ enum LauncherLogicChecks {
         checkWhatsUpCache()
         checkRecency()
         checkOverlayScreenWire()
+        checkWorkspaceWindowLookup()
         print("Launcher logic checks passed")
     }
 
@@ -100,7 +101,8 @@ enum LauncherLogicChecks {
             hiddenWorkspaces: [
                 OverlayHiddenWorkspace(tag: "o5", windows: [w(9, "Chrome", "cats"), w(11, "?", "")]),
                 OverlayHiddenWorkspace(tag: "z", windows: []),
-            ]
+            ],
+            ignoredWindows: []
         )
         let m = Ask.manifold(question: "Where is: the deploy", snapshot: snap,
                              text: { $0 == 9 ? "a  b\nc" : nil }, budget: 30, perWindow: 100)
@@ -181,7 +183,8 @@ enum LauncherLogicChecks {
         func snap(_ screens: [(String, [OverlayWindowEntry])], _ hidden: [(String, [OverlayWindowEntry])]) -> OverlaySnapshot {
             OverlaySnapshot(debugOverlays: false,
                             screens: screens.enumerated().map { OverlayScreenEntry(screenId: $0.offset, frame: .zero, workspaceTag: $0.element.0, isActive: $0.offset == 0, windows: $0.element.1) },
-                            hiddenWorkspaces: hidden.map { OverlayHiddenWorkspace(tag: $0.0, windows: $0.1) })
+                            hiddenWorkspaces: hidden.map { OverlayHiddenWorkspace(tag: $0.0, windows: $0.1) },
+                            ignoredWindows: [])
         }
         var hashes: [UInt32: Int] = [7: 1]
         let cache = WhatsUpCache(text: { _ in nil }, textHash: { hashes[$0] }, quiet: { true })
@@ -249,5 +252,28 @@ enum LauncherLogicChecks {
             let back = try! JSONDecoder().decode(OverlayScreenEntry.self, from: data)
             precondition(back.isActive == active && back.screenId == 1 && back.workspaceTag == "2", "\(active)")
         }
+    }
+
+    // MARK: Query socket lookup
+
+    static func checkWorkspaceWindowLookup() {
+        func w(_ id: UInt32) -> OverlayWindowEntry {
+            OverlayWindowEntry(windowId: id, pid: 1, appName: nil, title: nil, bundleId: nil,
+                               workspaceTag: nil, frame: .zero, isFocused: false, isFloating: false)
+        }
+        let left = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let right = CGRect(x: 100, y: 0, width: 100, height: 100)
+        let snap = OverlaySnapshot(debugOverlays: false, screens: [
+            OverlayScreenEntry(screenId: 0, frame: left, workspaceTag: "1", isActive: true, windows: [w(1), w(2)]),
+            OverlayScreenEntry(screenId: 1, frame: right, workspaceTag: "2", isActive: false, windows: [w(3)]),
+        ], hiddenWorkspaces: [], ignoredWindows: [])
+        precondition(WorkspaceWindowLookup.windowIds(forScreenFrame: left, in: snap, ignoredWindowIds: { _ in [] }) == [1, 2])
+        precondition(WorkspaceWindowLookup.windowIds(forScreenFrame: right, in: snap, ignoredWindowIds: { _ in [] }) == [3])
+        precondition(WorkspaceWindowLookup.windowIds(forScreenFrame: left, in: snap, ignoredWindowIds: { _ in [50] }) == [1, 2, 50], "ignored ids follow the screen windows")
+        // a frame a few pixels off still resolves to the nearest screen
+        precondition(WorkspaceWindowLookup.windowIds(forScreenFrame: CGRect(x: 102, y: 1, width: 100, height: 100), in: snap, ignoredWindowIds: { _ in [] }) == [3])
+        precondition(WorkspaceWindowLookup.windowIds(forScreenFrame: left, in: nil, ignoredWindowIds: { _ in [] }) == [])
+        let empty = OverlaySnapshot(debugOverlays: false, screens: [], hiddenWorkspaces: [], ignoredWindows: [])
+        precondition(WorkspaceWindowLookup.windowIds(forScreenFrame: left, in: empty, ignoredWindowIds: { _ in [] }) == [])
     }
 }

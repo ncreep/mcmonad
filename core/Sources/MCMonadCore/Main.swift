@@ -84,6 +84,7 @@ final class EventBridge: SkyLightEventDelegate {
     /// Register a managed window. Starts AX focus tracking for the PID on
     /// the first window of that PID.
     private func addManagedWindow(windowId: UInt32, pid: pid_t) {
+        fputs("DEBUG: addManagedWindow wid=\(windowId) pid=\(pid) alreadyIn=\(managedWindowIds.contains(windowId)) setSizeBefore=\(managedWindowIds.count)\n", stderr)
         managedWindowIds.insert(windowId)
         windowIdToPid[windowId] = pid
         let wasEmpty = (pidWindowIds[pid]?.isEmpty ?? true)
@@ -96,6 +97,7 @@ final class EventBridge: SkyLightEventDelegate {
     /// Unregister a managed window. Stops AX focus tracking for the PID
     /// once the last window of that PID is gone.
     private func removeManagedWindow(windowId: UInt32) {
+        fputs("DEBUG: removeManagedWindow wid=\(windowId) wasIn=\(managedWindowIds.contains(windowId)) setSizeBefore=\(managedWindowIds.count)\n", stderr)
         managedWindowIds.remove(windowId)
         guard let pid = windowIdToPid.removeValue(forKey: windowId) else { return }
         if var wids = pidWindowIds[pid] {
@@ -263,12 +265,14 @@ final class EventBridge: SkyLightEventDelegate {
     ) {
         switch event {
         case .created(let windowId, _):
+            fputs("DEBUG: skyLightEvent .created wid=\(windowId) wasManaged=\(managedWindowIds.contains(windowId))\n", stderr)
             // Query SkyLight for the snapshot, then enrich with AX
             if let snap = SkyLightQuery.queryWindow(windowId) {
                 adoptWindow(snap)
             }
 
-        case .destroyed(let windowId, _):
+        case .destroyed(let windowId, let spaceId):
+            fputs("DEBUG: skyLightEvent .destroyed wid=\(windowId) spaceId=\(spaceId) wasManaged=\(managedWindowIds.contains(windowId)) stillExists=\(SkyLightQuery.windowExists(windowId))\n", stderr)
             removeManagedWindow(windowId: windowId)
             rejectedWindowIds.removeValue(forKey: windowId)
             ineligibleStreak.removeValue(forKey: windowId)
@@ -276,6 +280,7 @@ final class EventBridge: SkyLightEventDelegate {
             socketServer.send(.windowDestroyed(windowId: windowId))
 
         case .closed(let windowId):
+            fputs("DEBUG: skyLightEvent .closed wid=\(windowId) wasManaged=\(managedWindowIds.contains(windowId)) stillExists=\(SkyLightQuery.windowExists(windowId))\n", stderr)
             removeManagedWindow(windowId: windowId)
             rejectedWindowIds.removeValue(forKey: windowId)
             ineligibleStreak.removeValue(forKey: windowId)
@@ -390,6 +395,8 @@ struct MCMonadCoreApp {
 
         // Create SocketServer + CommandExecutor
         let socketServer = SocketServer()
+        let queryServer = QueryServer(snapshotBox: overlayManager.snapshotBox, socketServer: socketServer)
+        queryServer.start()
         let executor = CommandExecutor(
             hotkeyManager: hotkeyManager,
             displayManager: displayManager,
@@ -677,7 +684,7 @@ struct MCMonadCoreApp {
 
         // Keep references alive for the lifetime of the process
         _keepAlive = (statusBar, hotkeyManager, displayManager, overlayManager,
-                      socketServer, executor, eventBridge, dragHandler,
+                      socketServer, queryServer, executor, eventBridge, dragHandler,
                       mouseDownMonitor, spotlight, timerController, screenIndex,
                       whatsUpCache)
     }

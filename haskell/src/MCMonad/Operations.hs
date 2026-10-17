@@ -8,6 +8,7 @@ module MCMonad.Operations
     , warpToFocus
     , reassertHiddenWindows
     , frameAtParkCorner
+    , attributeIgnoredWindows
       -- * Window lifecycle
     , manage
     , manageSilent
@@ -77,7 +78,7 @@ import Data.Aeson.Types (Pair)
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (atomicModifyIORef', readIORef, writeIORef)
 import Data.Int (Int32)
-import Data.List (find, sortBy)
+import Data.List (find, maximumBy, minimumBy, sortBy)
 import Data.Word (Word32)
 import Data.Maybe (fromMaybe)
 import Data.Monoid (Endo(..))
@@ -525,10 +526,15 @@ buildOverlaySnapshot = do
             }
         screens = map mkScreen (W.current ws : W.visible ws)
         hidden  = map mkHidden (W.hidden ws)
+    ignored <- gets ignoredWindows
     return OverlaySnapshot
         { osDebugOverlays    = dbg
         , osScreens          = screens
         , osHiddenWorkspaces = hidden
+        , osIgnoredWindows   = map (\wr -> OverlayIgnoredWindow
+                                        { oiwWindowId = wrWindowId wr
+                                        , oiwPid      = wrPid wr
+                                        }) (S.toList ignored)
         }
 
 -- | Build a snapshot of the current state and push it to mcmonad-core
@@ -569,6 +575,50 @@ workspaceWindows ws meta rects focused wsp =
     tag         = W.tag wsp
     floatingMap = W.floating ws
     zeroRect    = Rectangle 0 0 0 0
+
+-- | The ignored windows (see 'MCMonad.ManageHook.doIgnore') that belong to
+-- the screen nearest a queried screen frame. mcmonad-core supplies each
+-- ignored window's live frame; the brain alone knows the screens. A window
+-- is parked (see 'isIgnoredParked') and parked windows belong to no screen.
+-- Otherwise its home is the screen it overlaps most. Only windows in
+-- 'ignoredWindows' are considered.
+attributeIgnoredWindows
+    :: S.Set WindowRef -> W.StackSet String l a ScreenId ScreenDetail -> Rectangle
+    -> [(Word32, Int32, Rectangle)] -> [Word32]
+attributeIgnoredWindows ignored ws target facts =
+    [ wid | (wid, pid, fr) <- facts
+          , S.member (WindowRef wid pid) ignored
+          , not (isIgnoredParked (map snd screens) fr)
+          , homeOf fr == nearest ]
+  where
+    screens = [ (W.screen s, screenRect (W.screenDetail s)) | s <- screensOf ws ]
+    nearest = fst (minimumBy (comparing (\(_, r) -> originDist2 r target)) screens)
+    homeOf fr = fst (maximumBy (comparing (\(_, r) -> rectOverlapArea fr r)) screens)
+    originDist2 a b =
+        (rect_x a - rect_x b) ^ (2 :: Int) + (rect_y a - rect_y b) ^ (2 :: Int)
+
+-- | The park test for ignored windows: the frame's best overlap with any
+-- screen is at most a 2x2 sliver. Matches the Swift isAlreadyParked
+-- (core/Sources/MCMonadCore/IPC/ParkGeometry.swift).
+isIgnoredParked :: [Rectangle] -> Rectangle -> Bool
+isIgnoredParked screenRects fr =
+    let (w, h) = overlapSides fr (maximumBy (comparing (rectOverlapArea fr)) screenRects)
+    in w <= 2 && h <= 2
+
+-- | Per-axis extent of the overlap of two rects (0 where they don't meet).
+overlapSides :: Rectangle -> Rectangle -> (Double, Double)
+overlapSides a b = (axis rect_x rect_w, axis rect_y rect_h)
+  where
+    axis pos len = max 0 (min (pos a + len a) (pos b + len b) - max (pos a) (pos b))
+
+-- | Area of the intersection of two rects (0 if they don't overlap).
+rectOverlapArea :: Rectangle -> Rectangle -> Double
+rectOverlapArea a b =
+    let x1 = max (rect_x a) (rect_x b)
+        y1 = max (rect_y a) (rect_y b)
+        x2 = min (rect_x a + rect_w a) (rect_x b + rect_w b)
+        y2 = min (rect_y a + rect_h a) (rect_y b + rect_h b)
+    in max 0 (x2 - x1) * max 0 (y2 - y1)
 
 -- | Find the screen rectangle for a given window. Falls back to the current
 -- screen if the window is not found on any screen.
@@ -720,18 +770,49 @@ manage wi hook = do
                                  ++ W.hidden ws)
             originTag =
                 chooseOriginTag now allTags wr (wiPid wi) reclaims origins
+            -- Computed here, not read back via 'gets windowset' after
+            -- 'windows' below runs: 'windows' pushes the OverlaySnapshot
+            -- as its very last step, so recording the ignore *after* it
+            -- would miss that first push, and the window wouldn't reach
+            -- the per-screen query until some unrelated later event pushed
+            -- a fresh one.
+            finalWs = placeManaged wr originTag transform ws
         modify $ \s -> s
             { windowMetadata  = M.insert wr (metadataFromInfo wi) (windowMetadata s)
             , unmanagedOrigin = M.delete (wiPid wi) (unmanagedOrigin s)
             , reclaimOrigin   = M.delete wr (pruneReclaims now (reclaimOrigin s))
             }
-        windows (placeManaged wr originTag transform)
+        recordIfIgnored wr finalWs
+        windows (const finalWs)
         -- A window routed to a hidden workspace never enters the
         -- visible set, so the 'windows' call above did not change it
         -- and issued no hides — the new window would sit on screen at
         -- whatever frame its app chose. Park it (and any other
         -- straggler) explicitly.
         whenJust originTag $ \_ -> reassertHiddenWindows
+
+-- | If the manage hook (e.g. 'MCMonad.ManageHook.doIgnore') left this
+-- window out of the given (post-hook) 'WindowSet', track it in
+-- 'ignoredWindows' instead. mcmonad never positions or hides an ignored
+-- window, so it has no workspace of its own — it's simply always
+-- visible on whatever screen it physically sits on, under whatever
+-- workspace that screen currently shows. 'MCMonad.IPC.QueryServer'
+-- resolves that live, per query, from this identity-only record, so
+-- there's nothing here to go stale across a workspace switch.
+--
+-- Takes the resulting 'WindowSet' explicitly rather than re-deriving it
+-- via 'gets windowset', since at both call sites ('manage', before
+-- 'windows' applies the hook's transform to the real state; and
+-- 'manageSilent', right after its own direct 'modify') the authoritative
+-- answer already exists locally — recomputing or re-reading it would
+-- either run the hook's logic twice or, in 'manage', read stale state.
+--
+-- Logs each addition to 'ignoredWindows'.
+recordIfIgnored :: WindowRef -> WindowSet -> M ()
+recordIfIgnored wr finalWs =
+    when (not (W.member wr finalWs)) $ do
+        modify $ \s -> s { ignoredWindows = S.insert wr (ignoredWindows s) }
+        io $ hPutStrLn stderr $ "IGNORED: added " ++ show wr
 
 -- | Insert a window into the StackSet without triggering layout.
 -- Used during startup to batch-insert all existing windows.
@@ -741,10 +822,12 @@ manageSilent wi hook = do
     ws <- gets windowset
     when (not (W.member wr ws)) $ do
         Endo transform <- userCodeDef (Endo id) (runManageHook hook wi)
+        let finalWs = transform (W.insertUp wr ws)
         modify $ \s -> s
-            { windowset = transform (W.insertUp wr (windowset s))
+            { windowset = finalWs
             , windowMetadata = M.insert wr (metadataFromInfo wi) (windowMetadata s)
             }
+        recordIfIgnored wr finalWs
 
 -- | If this window is one the restore is still waiting for, put it back
 -- on the workspace it was saved on — at its saved position, with its
@@ -806,6 +889,19 @@ forgetPending wid = do
 unmanage :: WindowRef -> M ()
 unmanage w = do
     ws <- gets windowset
+    -- A window the manage hook ignored was never a 'windowset' member,
+    -- so the block below (gated on membership) would otherwise never
+    -- run for it — leaving both 'ignoredWindows' and 'windowMetadata'
+    -- stale forever once it closes. Handled unconditionally, up front,
+    -- since it's mutually exclusive with the membership case anyway.
+    wasIgnored <- gets (S.member w . ignoredWindows)
+    when wasIgnored $ do
+        modify $ \s -> s
+            { ignoredWindows = S.delete w (ignoredWindows s)
+            , windowMetadata = M.delete w (windowMetadata s)
+            }
+        -- Logs each removal from 'ignoredWindows'.
+        io $ hPutStrLn stderr $ "IGNORED: removed " ++ show w ++ " (destroyed)"
     when (W.member w ws) $ do
         -- Remember where the pid's LAST window lived so 'manage' can
         -- route a destroy/recreate replacement (Gecko's fullscreen
