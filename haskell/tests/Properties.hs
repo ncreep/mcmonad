@@ -8,6 +8,7 @@ import MCMonad.Core
     , FocusIntent(..), armingIntent, isFocusIntentTarget
     , isIntentTargetPid, isSettlingEcho, isSettlingPidEcho
     , withinSettleWindow, consumeIntent
+    , armKillChurnSuppression, shouldSuppressFrontApp
     , PendingWindow(..), Timer(..), LayoutClass(..)
     )
 import MCMonad.IPC (WindowInfo(..), Command(..), Event(..), OverlayScreenEntry(..), OverlayIgnoredWindow(..), parseIgnoredFact)
@@ -1740,6 +1741,27 @@ prop_shouldFollowIntoHidden_requires_both :: Bool -> Bool -> Bool
 prop_shouldFollowIntoHidden_requires_both onHidden isFrontmostApp =
     shouldFollowIntoHidden onHidden isFrontmostApp == (onHidden && isFrontmostApp)
 
+-- No guard armed: never suppress
+prop_shouldSuppressFrontApp_unarmed :: Bool
+prop_shouldSuppressFrontApp_unarmed =
+    not (shouldSuppressFrontApp originBase Nothing)
+
+-- Still within the deadline (including exactly at it): suppress
+prop_shouldSuppressFrontApp_within_deadline :: NonNegative Int -> Property
+prop_shouldSuppressFrontApp_within_deadline (NonNegative ms) =
+    let deadline = armKillChurnSuppression originBase
+        graceMs = round (1000 * diffUTCTime deadline originBase) :: Int
+    in ms <= graceMs ==>
+        shouldSuppressFrontApp (addUTCTime (fromIntegral ms / 1000) originBase) (Just deadline)
+
+-- Past the deadline: never suppress, however long ago it was armed
+prop_shouldSuppressFrontApp_after_deadline :: Positive Int -> Bool
+prop_shouldSuppressFrontApp_after_deadline (Positive extraMs) =
+    let deadline = armKillChurnSuppression originBase
+        graceSpan = diffUTCTime deadline originBase
+        extra = fromIntegral extraMs / 1000
+    in not (shouldSuppressFrontApp (addUTCTime (graceSpan + extra) originBase) (Just deadline))
+
 -- Brain-side attribution of ignored windows to the queried screen
 prop_attributeIgnored_home_screen :: Bool
 prop_attributeIgnored_home_screen =
@@ -2032,6 +2054,9 @@ allProperties =
 
     , ("focus: hidden-workspace window is routed",    property prop_onHiddenWorkspace_matches_hidden_stacks)
     , ("focus: hidden-workspace follow requires frontmost app", property prop_shouldFollowIntoHidden_requires_both)
+    , ("focus: kill-churn suppression unarmed never suppresses", property prop_shouldSuppressFrontApp_unarmed)
+    , ("focus: kill-churn suppression holds within deadline",    property prop_shouldSuppressFrontApp_within_deadline)
+    , ("focus: kill-churn suppression lapses after deadline",    property prop_shouldSuppressFrontApp_after_deadline)
 
     , ("ignored: attributed to nearest screen, parked excluded", property prop_attributeIgnored_home_screen)
     , ("ignored: fact JSON parses back",              property prop_ignoredFact_parses_back)

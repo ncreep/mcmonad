@@ -51,6 +51,8 @@ module MCMonad.Core
     , FocusIntent(..)
     , armingIntent
     , isFocusIntentTarget
+    , armKillChurnSuppression
+    , shouldSuppressFrontApp
     , isIntentTargetPid
     , isSettlingEcho
     , isSettlingPidEcho
@@ -572,6 +574,14 @@ data MState = MState
       -- callers that want the window macOS actually has focused rather
       -- than 'windowset', which omits 'MCMonad.ManageHook.doIgnore'd
       -- windows entirely.
+    , suppressFrontAppUntil :: !(Maybe UTCTime)
+      -- ^ Set by 'MCMonad.Operations.kill' when closing a window leaves
+      -- its workspace empty: there is nothing left to explicitly focus
+      -- (see 'MCMonad.Operations.kill'), so macOS's own choice of what to
+      -- activate next (typically whatever app was active before the
+      -- closed window) must not be read as a deliberate app switch.
+      -- Consumed by the first 'FrontAppChanged' that arrives, whether or
+      -- not it is still within the deadline.
     , unmanagedOrigin  :: !(Map.Map Int32 (String, UTCTime))
       -- ^ pid → (workspace tag, time) of the pid's most recently
       -- destroyed *last* window. Some apps (Gecko\/LibreWolf) destroy
@@ -934,6 +944,24 @@ defaultFocusBudget = 4
 -- keyboard app-switch a beat later is treated as genuine intent.
 settleGrace :: NominalDiffTime
 settleGrace = 0.6
+
+-- | How long a 'suppressFrontAppUntil' guard lasts. Comfortably covers
+-- the observed ~100ms gap between closing a window and macOS reporting
+-- its own choice of what to activate next, while staying short enough
+-- that a deliberate app switch shortly after closing the last window on
+-- a workspace is still treated as genuine intent.
+killChurnGrace :: NominalDiffTime
+killChurnGrace = 0.5
+
+-- | Deadline for a fresh 'suppressFrontAppUntil' guard, armed now.
+armKillChurnSuppression :: UTCTime -> UTCTime
+armKillChurnSuppression now = addUTCTime killChurnGrace now
+
+-- | Should an incoming 'MCMonad.IPC.FrontAppChanged' be read as kill-churn
+-- noise rather than genuine intent? See 'suppressFrontAppUntil'.
+shouldSuppressFrontApp :: UTCTime -> Maybe UTCTime -> Bool
+shouldSuppressFrontApp _   Nothing         = False
+shouldSuppressFrontApp now (Just deadline) = now <= deadline
 
 -- | Build a fresh intent from the focus 'MCMonad.Operations.windows'
 -- just committed, plus the set of windows it wrote frames for (for

@@ -171,6 +171,7 @@ launch cfg = do
                        , focusIntent = Nothing
                        , frontmostPid = Nothing
                        , pendingFocusQuery = Nothing
+                       , suppressFrontAppUntil = Nothing
                        , unmanagedOrigin = Map.empty
                        , reclaimOrigin  = Map.empty
                        , pendingRestore = rsPending restored
@@ -881,6 +882,20 @@ handleFocusedWindowChanged wid pid = do
 handleFrontAppChanged :: Int32 -> M ()
 handleFrontAppChanged pid = do
     modify $ \s -> s { frontmostPid = Just pid }
+    now <- io getCurrentTime
+    suppressUntil <- gets suppressFrontAppUntil
+    modify $ \s -> s { suppressFrontAppUntil = Nothing }
+    if shouldSuppressFrontApp now suppressUntil
+        then
+            -- 'MCMonad.Operations.kill' just closed the last window on a
+            -- workspace; this is macOS's own choice of what to activate
+            -- next, not a deliberate switch. Consumed either way (above),
+            -- so a later genuine switch to this same app isn't eaten too.
+            return ()
+        else handleFrontAppChangedGenuine pid
+
+handleFrontAppChangedGenuine :: Int32 -> M ()
+handleFrontAppChangedGenuine pid = do
     fi <- gets focusIntent
     now <- io getCurrentTime
     case fi of

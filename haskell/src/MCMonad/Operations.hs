@@ -1173,9 +1173,25 @@ sendMessageWithNoRefresh m = do
 -- silently do nothing while one is focused. Asynchronous, same as
 -- 'jumpToActiveWindow' — the close happens when
 -- 'MCMonad.IPC.FocusedWindowQueryResponse' arrives.
+--
+-- If another window remains on the current workspace, explicitly focus
+-- it right away rather than letting macOS decide: closing the last
+-- *visible* window of its app normally hands focus to whatever app was
+-- active before, which can be on a different workspace entirely, and
+-- 'MCMonad.Main' would otherwise read that as a deliberate switch and
+-- follow it there. Asserting our own choice first pre-empts that. If no
+-- window remains (the workspace becomes empty), there is nothing to
+-- assert — arm 'suppressFrontAppUntil' instead, so that same reflex is
+-- read as noise from this close rather than real intent.
 kill :: M ()
 kill = queryFocusedWindow $ \w -> do
     conn <- asks connection
+    ws <- gets windowset
+    when (W.member w ws) $ case W.peek (W.delete w ws) of
+        Just nw -> io $ sendCommand conn (FocusWindow (wrWindowId nw) (wrPid nw))
+        Nothing -> do
+            now <- io getCurrentTime
+            modify $ \s -> s { suppressFrontAppUntil = Just (armKillChurnSuppression now) }
     io $ sendCommand conn (CloseWindow (wrWindowId w) (wrPid w))
 
 -- | Fetch the window macOS currently has focused and run an action on it,
