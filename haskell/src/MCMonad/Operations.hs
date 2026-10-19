@@ -36,6 +36,7 @@ module MCMonad.Operations
     , sendMessageWithNoRefresh
       -- * Window actions
     , kill
+    , queryFocusedWindow
     , withFocused
     , reveal
     , setFocus
@@ -90,7 +91,7 @@ import Data.IORef (atomicModifyIORef', readIORef, writeIORef)
 import Data.Int (Int32)
 import Data.List (find, maximumBy, minimumBy, sortBy)
 import Data.Word (Word32)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Monoid (Endo(..))
 import Data.Ord (Down(..), comparing)
 import qualified Data.Map.Strict as M
@@ -328,6 +329,16 @@ windows f = do
         case newFocus of
             Just w  -> io $ sendCommand conn (FocusWindow (wrWindowId w) (wrPid w))
             Nothing -> return ()
+    -- Leaving the current workspace empty -- whether this pass switched
+    -- to one (whichever of 'viewWorkspace', 'W.view', 'W.greedyView',
+    -- etc. a hotkey binding used to get here, they all funnel through
+    -- this one 'windows' primitive) or closed its last window -- arms
+    -- 'emptyWorkspaceGuardUntil'. Either way, a launching app's handoff
+    -- can bounce 'FrontAppChanged' back onto the previous workspace (see
+    -- 'MCMonad.Main.handleFrontAppChanged'/'MCMonad.Main.confirmFrontAppChange').
+    when (isNothing newFocus) $ do
+        nowGuard <- io getCurrentTime
+        modify $ \s -> s { emptyWorkspaceGuardUntil = Just (armEmptyWorkspaceGuard nowGuard) }
     -- Arm suppression against every window we just wrote a frame for, not
     -- only 'newFocus'. This pass moved windows on *both* monitors, and the
     -- AX echoes from the secondary monitor's writes must not be mistaken

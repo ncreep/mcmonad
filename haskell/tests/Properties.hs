@@ -8,7 +8,7 @@ import MCMonad.Core
     , FocusIntent(..), armingIntent, isFocusIntentTarget
     , isIntentTargetPid, isSettlingEcho, isSettlingPidEcho
     , withinSettleWindow, consumeIntent
-    , armKillChurnSuppression, shouldSuppressFrontApp
+    , armKillChurnSuppression, armEmptyWorkspaceGuard, shouldSuppressFrontApp
     , PendingWindow(..), Timer(..), LayoutClass(..)
     )
 import MCMonad.IPC (WindowInfo(..), Command(..), Event(..), OverlayScreenEntry(..), OverlayIgnoredWindow(..), parseIgnoredFact)
@@ -1762,6 +1762,22 @@ prop_shouldSuppressFrontApp_after_deadline (Positive extraMs) =
         extra = fromIntegral extraMs / 1000
     in not (shouldSuppressFrontApp (addUTCTime (graceSpan + extra) originBase) (Just deadline))
 
+-- Same deadline logic, armed for the empty-workspace guard instead: still
+-- within deadline suppresses, past it doesn't
+prop_armEmptyWorkspaceGuard_within_deadline :: NonNegative Int -> Property
+prop_armEmptyWorkspaceGuard_within_deadline (NonNegative ms) =
+    let deadline = armEmptyWorkspaceGuard originBase
+        graceMs = round (1000 * diffUTCTime deadline originBase) :: Int
+    in ms <= graceMs ==>
+        shouldSuppressFrontApp (addUTCTime (fromIntegral ms / 1000) originBase) (Just deadline)
+
+prop_armEmptyWorkspaceGuard_after_deadline :: Positive Int -> Bool
+prop_armEmptyWorkspaceGuard_after_deadline (Positive extraMs) =
+    let deadline = armEmptyWorkspaceGuard originBase
+        graceSpan = diffUTCTime deadline originBase
+        extra = fromIntegral extraMs / 1000
+    in not (shouldSuppressFrontApp (addUTCTime (graceSpan + extra) originBase) (Just deadline))
+
 -- Brain-side attribution of ignored windows to the queried screen
 prop_attributeIgnored_home_screen :: Bool
 prop_attributeIgnored_home_screen =
@@ -2057,6 +2073,8 @@ allProperties =
     , ("focus: kill-churn suppression unarmed never suppresses", property prop_shouldSuppressFrontApp_unarmed)
     , ("focus: kill-churn suppression holds within deadline",    property prop_shouldSuppressFrontApp_within_deadline)
     , ("focus: kill-churn suppression lapses after deadline",    property prop_shouldSuppressFrontApp_after_deadline)
+    , ("focus: empty-workspace guard holds within deadline",     property prop_armEmptyWorkspaceGuard_within_deadline)
+    , ("focus: empty-workspace guard lapses after deadline",     property prop_armEmptyWorkspaceGuard_after_deadline)
 
     , ("ignored: attributed to nearest screen, parked excluded", property prop_attributeIgnored_home_screen)
     , ("ignored: fact JSON parses back",              property prop_ignoredFact_parses_back)

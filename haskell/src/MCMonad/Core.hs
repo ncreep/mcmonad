@@ -52,6 +52,7 @@ module MCMonad.Core
     , armingIntent
     , isFocusIntentTarget
     , armKillChurnSuppression
+    , armEmptyWorkspaceGuard
     , shouldSuppressFrontApp
     , isIntentTargetPid
     , isSettlingEcho
@@ -582,6 +583,20 @@ data MState = MState
       -- closed window) must not be read as a deliberate app switch.
       -- Consumed by the first 'FrontAppChanged' that arrives, whether or
       -- not it is still within the deadline.
+    , emptyWorkspaceGuardUntil :: !(Maybe UTCTime)
+      -- ^ Set by 'MCMonad.Operations.windows' whenever a pass leaves the
+      -- current workspace empty (switching to one, or closing its last
+      -- window): spawning something there next can bounce
+      -- 'FrontAppChanged' through the previously frontmost app for a
+      -- stretch (observed anywhere from ~150ms to ~700ms) while the new
+      -- app's process hands off to its real one, and that bounce passes
+      -- 'MCMonad.Main.confirmFrontAppChange's AX check just as readily
+      -- as a genuine switch. Unlike 'suppressFrontAppUntil', not
+      -- consumed by the first 'FrontAppChanged' — a bounce can repeat —
+      -- cleared instead by whichever comes first: a 'WindowCreated' (the
+      -- thing being waited for has shown up) or a 'UserMouseDown' (an
+      -- actual physical click always wins), with the deadline itself
+      -- only a fallback cap.
     , unmanagedOrigin  :: !(Map.Map Int32 (String, UTCTime))
       -- ^ pid → (workspace tag, time) of the pid's most recently
       -- destroyed *last* window. Some apps (Gecko\/LibreWolf) destroy
@@ -953,12 +968,28 @@ settleGrace = 0.6
 killChurnGrace :: NominalDiffTime
 killChurnGrace = 0.5
 
+-- | Fallback cap on an 'emptyWorkspaceGuardUntil' guard, for the rare
+-- case neither of its usual disarm triggers fires. Generous: a slow
+-- app launch's handoff bounce has been observed taking ~700ms on its
+-- own, well short of this.
+emptyWorkspaceSpawnGrace :: NominalDiffTime
+emptyWorkspaceSpawnGrace = 5
+
+-- | Deadline for a guard armed @grace@ seconds from now.
+armGuardUntil :: NominalDiffTime -> UTCTime -> UTCTime
+armGuardUntil grace now = addUTCTime grace now
+
 -- | Deadline for a fresh 'suppressFrontAppUntil' guard, armed now.
 armKillChurnSuppression :: UTCTime -> UTCTime
-armKillChurnSuppression now = addUTCTime killChurnGrace now
+armKillChurnSuppression = armGuardUntil killChurnGrace
 
--- | Should an incoming 'MCMonad.IPC.FrontAppChanged' be read as kill-churn
--- noise rather than genuine intent? See 'suppressFrontAppUntil'.
+-- | Deadline for a fresh 'emptyWorkspaceGuardUntil' guard, armed now.
+armEmptyWorkspaceGuard :: UTCTime -> UTCTime
+armEmptyWorkspaceGuard = armGuardUntil emptyWorkspaceSpawnGrace
+
+-- | Should an incoming 'MCMonad.IPC.FrontAppChanged' be read as noise
+-- rather than genuine intent, per either 'suppressFrontAppUntil' or
+-- 'emptyWorkspaceGuardUntil'?
 shouldSuppressFrontApp :: UTCTime -> Maybe UTCTime -> Bool
 shouldSuppressFrontApp _   Nothing         = False
 shouldSuppressFrontApp now (Just deadline) = now <= deadline

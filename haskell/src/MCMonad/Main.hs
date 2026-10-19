@@ -172,6 +172,7 @@ launch cfg = do
                        , frontmostPid = Nothing
                        , pendingFocusQuery = Nothing
                        , suppressFrontAppUntil = Nothing
+                       , emptyWorkspaceGuardUntil = Nothing
                        , unmanagedOrigin = Map.empty
                        , reclaimOrigin  = Map.empty
                        , pendingRestore = rsPending restored
@@ -524,6 +525,10 @@ handleEvent debug cfg hotkeyIdMap evt = do
     when debug $ io $ logTS $ "EVENT: " ++ show evt
     case evt of
         WindowCreated winfo -> do
+            -- Whatever 'emptyWorkspaceGuardUntil' was waiting for has
+            -- shown up; a 'FrontAppChanged' bounce no longer needs the
+            -- extra scrutiny (see 'handleFrontAppChanged').
+            modify $ \s -> s { emptyWorkspaceGuardUntil = Nothing }
             -- A saved window the daemon is only reporting now goes back
             -- to its own workspace; only genuinely new windows meet the
             -- manage hook.
@@ -647,10 +652,9 @@ handleEvent debug cfg hotkeyIdMap evt = do
 
         FocusedWindowQueryResponse wid pid -> do
             -- Answer to our own 'QueryFocusedWindow'; run whatever the
-            -- caller (e.g. 'MCMonad.Operations.jumpToActiveWindow' or
-            -- 'MCMonad.Operations.kill') queued for it, bypassing the
-            -- 'focusIntent' dispatch entirely — this is a direct,
-            -- user-requested action on the real focused window.
+            -- caller (e.g. 'MCMonad.Operations.jumpToActiveWindow',
+            -- 'MCMonad.Operations.kill', or this module's own
+            -- 'confirmFrontAppChange') queued for it.
             pending <- gets pendingFocusQuery
             modify $ \s -> s { pendingFocusQuery = Nothing }
             whenJust pending ($ WindowRef wid pid)
@@ -688,8 +692,10 @@ handleEvent debug cfg hotkeyIdMap evt = do
             -- intent from macOS' AX bounce echoes after a 'FocusWindow'
             -- IPC command, so disarm 'focusIntent' unconditionally and
             -- let the next AX / NSWorkspace event flow through to
-            -- 'resolveFocusedWindow' / 'resolveFrontApp' normally.
-            modify $ \s -> s { focusIntent = Nothing }
+            -- 'resolveFocusedWindow' / 'resolveFrontApp' normally. Same
+            -- reasoning disarms 'emptyWorkspaceGuardUntil': an actual
+            -- click always wins over the extra scrutiny it adds.
+            modify $ \s -> s { focusIntent = Nothing, emptyWorkspaceGuardUntil = Nothing }
 
         ScreensChanged scs ->
             rescreen scs
@@ -885,6 +891,7 @@ handleFrontAppChanged pid = do
     now <- io getCurrentTime
     suppressUntil <- gets suppressFrontAppUntil
     modify $ \s -> s { suppressFrontAppUntil = Nothing }
+    guardUntil <- gets emptyWorkspaceGuardUntil
     if shouldSuppressFrontApp now suppressUntil
         then
             -- 'MCMonad.Operations.kill' just closed the last window on a
@@ -892,7 +899,15 @@ handleFrontAppChanged pid = do
             -- next, not a deliberate switch. Consumed either way (above),
             -- so a later genuine switch to this same app isn't eaten too.
             return ()
-        else handleFrontAppChangedGenuine pid
+        else if shouldSuppressFrontApp now guardUntil
+            then
+                -- 'MCMonad.Operations.windows' just left the current
+                -- workspace empty and is still waiting for whatever gets
+                -- spawned on it (or a real click) to show up; unlike the
+                -- guard above, not consumed here — see
+                -- 'emptyWorkspaceGuardUntil'.
+                return ()
+            else handleFrontAppChangedGenuine pid
 
 handleFrontAppChangedGenuine :: Int32 -> M ()
 handleFrontAppChangedGenuine pid = do
@@ -911,38 +926,72 @@ handleFrontAppChangedGenuine pid = do
         Just _ -> do
             -- No longer checking for a target: follow any app switch as user intent.
             modify $ \s -> s { focusIntent = Nothing }
-            applyClean
+            confirmFrontAppChange pid
         Nothing ->
-            applyClean
-  where
-    applyClean = do
-        ws <- gets windowset
-        case resolveFrontApp pid ws of
-            Just ws' ->
-                -- Must go through 'windows', not a bare 'modify': for a
-                -- focus-dependent layout (e.g. 'Full'), which window
-                -- gets a rect depends on which one is focused, so a
-                -- pure state update leaves frames stale.
-                windows (const ws')
-            Nothing ->
-                -- The app has no visible window at all - it may still
-                -- have one on a hidden workspace (this is the only
-                -- signal we get for apps whose AX focus notifications
-                -- don't fire reliably). 'windows' brings that
-                -- workspace on screen if so.
-                whenJust (find (\w -> wrPid w == pid) (W.allWindows ws)) $
-                    windows . W.focusWindow
-        -- The first front-app change after a native-fullscreen Space
-        -- transition is the earliest reliable moment to heal the silent
-        -- un-park sweep (see the WindowFrameChanged handler) — the sweep
-        -- itself emits nothing. Only reached on a genuine external app
-        -- switch (the echo of mcmonad's own focus command short-circuits
-        -- above), so this no longer fires on every ordinary switch: one
-        -- that already just ran its own hide pass a moment earlier, whose
-        -- windows have not always finished settling into their parked
-        -- frame yet, making the "already parked" skip in executeHideWindows
-        -- miss and re-send a real, visible second park sweep for no reason.
-        reassertHiddenWindows
+            confirmFrontAppChange pid
+
+-- | Ask whether macOS genuinely has an AX-focused window for @pid@ right
+-- now before following its 'FrontAppChanged' — mirrors AeroSpace's own
+-- 'getNativeFocusedWindow', which requires the same before following a
+-- focus change. NSWorkspace can report an app as frontmost moments
+-- before that app actually has a focused window (most visibly during a
+-- slow app launch, where frontmost briefly reverts to whatever was
+-- active before); following the bare notification reads that as a
+-- deliberate switch. Reuses 'MCMonad.Operations.queryFocusedWindow'
+-- (also used by 'MCMonad.Operations.kill' and
+-- 'MCMonad.Operations.jumpToActiveWindow') rather than a second
+-- query/response channel; only follows if the confirmed window's pid
+-- still matches the one that was reported.
+--
+-- Also re-checks both suppression guards at response time, not only at
+-- the 'handleFrontAppChanged' dispatch that triggered this query: an app
+-- quitting on its own (not via 'MCMonad.Operations.kill') can report
+-- 'FrontAppChanged' for the previous app an instant *before* its window
+-- actually closes, so the guard a closing-to-empty 'windows' call arms
+-- may only land while this query is still in flight. Without this
+-- recheck, the query resolves after that -- genuinely confirming the
+-- previous app's window, since it really is frontmost by then -- and
+-- follows it anyway, missing the guard entirely.
+confirmFrontAppChange :: Int32 -> M ()
+confirmFrontAppChange pid = queryFocusedWindow $ \wr -> do
+    now <- io getCurrentTime
+    suppressUntil <- gets suppressFrontAppUntil
+    guardUntil <- gets emptyWorkspaceGuardUntil
+    let suppressed = shouldSuppressFrontApp now suppressUntil
+                   || shouldSuppressFrontApp now guardUntil
+    unless suppressed $ when (wrPid wr == pid) (applyFrontAppChange pid)
+
+-- | Switch to whatever workspace @pid@'s focused window lives on, once
+-- 'confirmFrontAppChange' has confirmed one genuinely exists.
+applyFrontAppChange :: Int32 -> M ()
+applyFrontAppChange pid = do
+    ws <- gets windowset
+    case resolveFrontApp pid ws of
+        Just ws' ->
+            -- Must go through 'windows', not a bare 'modify': for a
+            -- focus-dependent layout (e.g. 'Full'), which window
+            -- gets a rect depends on which one is focused, so a
+            -- pure state update leaves frames stale.
+            windows (const ws')
+        Nothing ->
+            -- The app has no visible window at all - it may still
+            -- have one on a hidden workspace (this is the only
+            -- signal we get for apps whose AX focus notifications
+            -- don't fire reliably). 'windows' brings that
+            -- workspace on screen if so.
+            whenJust (find (\w -> wrPid w == pid) (W.allWindows ws)) $
+                windows . W.focusWindow
+    -- The first front-app change after a native-fullscreen Space
+    -- transition is the earliest reliable moment to heal the silent
+    -- un-park sweep (see the WindowFrameChanged handler) — the sweep
+    -- itself emits nothing. Only reached on a genuine external app
+    -- switch (the echo of mcmonad's own focus command short-circuits
+    -- above), so this no longer fires on every ordinary switch: one
+    -- that already just ran its own hide pass a moment earlier, whose
+    -- windows have not always finished settling into their parked
+    -- frame yet, making the "already parked" skip in executeHideWindows
+    -- miss and re-send a real, visible second park sweep for no reason.
+    reassertHiddenWindows
 
 -- ---------------------------------------------------------------------------
 -- Helpers
