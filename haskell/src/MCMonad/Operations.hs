@@ -300,8 +300,17 @@ windows f = do
         frames = map toFrameAssignment (allPositions ++ restoredNatives)
     io $ logTS $ "FRAMES: " ++ show [(wrWindowId w, rect_x r, rect_y r, rect_w r, rect_h r) | (w, r) <- allPositions]
     unless (null frames) $ do
-        -- A new layout decision for these windows voids any earlier repair.
-        modify $ \s -> s { frameRepairs = foldr (M.delete . faWindowId) (frameRepairs s) frames }
+        -- A genuinely new target frame for a window voids its earlier
+        -- repair count. Re-sending the *same* target (because a sibling
+        -- window's repair triggered this full relayout, not a new
+        -- decision for this window) must not reset it -- otherwise two
+        -- windows that are each individually off-target can keep
+        -- clearing each other's attempt count on every pass and never
+        -- reach 'maxRepairAttempts'.
+        reps <- gets frameRepairs
+        let stillSameTarget fa = (frWant <$> M.lookup (faWindowId fa) reps) == Just (faFrame fa)
+            toClear = [faWindowId fa | fa <- frames, not (stillSameTarget fa)]
+        modify $ \s -> s { frameRepairs = foldr M.delete (frameRepairs s) toClear }
         io $ sendCommand conn (SetFrames frames)
 
     unless (null toShow) $
