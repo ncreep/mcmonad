@@ -91,7 +91,7 @@ import Data.IORef (atomicModifyIORef', readIORef, writeIORef)
 import Data.Int (Int32)
 import Data.List (find, maximumBy, minimumBy, sortBy)
 import Data.Word (Word32)
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Monoid (Endo(..))
 import Data.Ord (Down(..), comparing)
 import qualified Data.Map.Strict as M
@@ -874,6 +874,15 @@ pruneReclaims now m
 -- | Insert a window, apply the manage hook's transform, then the
 -- destroy/recreate route. The route runs last, so it wins when both apply;
 -- with no origin it is 'id'.
+--
+-- A recognized origin also overrides a hook decision that would delete
+-- the window outright (e.g. 'MCMonad.ManageHook.doIgnore'): an origin
+-- means this isn't a window the hook is seeing for the first time, it's
+-- one mcmonad already managed, continuing under a new identity, so a
+-- rule meant for genuinely new windows must not be able to drop it. The
+-- shiftWin route below can't undo that deletion on its own -- it's a
+-- no-op on a window that isn't present -- so the reinsertion has to
+-- happen before it runs.
 placeManaged
     :: WindowRef
     -> Maybe String
@@ -881,8 +890,12 @@ placeManaged
         -> W.StackSet String l WindowRef ScreenId ScreenDetail)
     -> W.StackSet String l WindowRef ScreenId ScreenDetail
     -> W.StackSet String l WindowRef ScreenId ScreenDetail
-placeManaged wr originTag transform =
-    maybe id (`W.shiftWin` wr) originTag . transform . W.insertUp wr
+placeManaged wr originTag transform ws =
+    maybe id (`W.shiftWin` wr) originTag (reinstateIfDropped (transform (W.insertUp wr ws)))
+  where
+    reinstateIfDropped ws'
+        | isJust originTag && not (W.member wr ws') = W.insertUp wr ws'
+        | otherwise = ws'
 
 -- | Windows to park after a pass. Orphans (windows a layout left without a
 -- rect) are always parked; the windows leaving the visible set only when

@@ -121,10 +121,18 @@ enum AXWindowService {
                 && subrole != kAXStandardWindowSubrole as String
                 && !hasCloseButton)
 
-        // Determine if fixed-size (no zoom button and not a standard window)
-        let hasZoomButton = hasResolved(7)
+        // Determine if fixed-size (no real zoom button). Same unreliable-
+        // presence issue as kAXFullScreenButtonAttribute above, but for a
+        // different app: Calculator's zoom button resolves in the batch
+        // call while disabled, so presence alone isn't enough -- the
+        // element has to be enabled too. (System Settings' zoom button, by
+        // contrast, genuinely is enabled -- it really is resizable now, so
+        // it won't be caught here; that's a real window, not a false
+        // presence.) The subrole check this used to also require never
+        // actually discriminated anything: every window here (fixed or
+        // not) reports "AXStandardWindow".
+        let hasZoomButton = hasResolved(7) && isAXElementEnabled(attr(7))
         let isFixedSize = !hasZoomButton
-            && subrole != (kAXStandardWindowSubrole as String)
 
         // App name and bundle ID
         var appName: String?
