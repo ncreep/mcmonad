@@ -67,6 +67,15 @@ enum FrameLog {
         // all (result=obeyed-late) or was genuinely refused
         // (result=still-defied).
         case reverified
+
+        // AXWindowService.closeWindow's outcome -- previously only logged
+        // via os.Logger (a different subsystem from this file), so a
+        // close command's success or failure was invisible here no
+        // matter what. result is one of: "window-not-found",
+        // "no-close-button", "not-an-element", "press-failed <code>", or
+        // "pressed" (the AX press succeeded -- not proof the window
+        // actually closed, just that the button accepted the action).
+        case cmdClose
     }
 
     private static let lock = NSLock()

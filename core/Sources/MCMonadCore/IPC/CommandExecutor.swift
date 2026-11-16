@@ -429,7 +429,31 @@ final class CommandExecutor {
     }
 
     private func executeCloseWindow(windowId: UInt32, pid: Int32) {
-        _ = AXWindowService.closeWindow(windowId: windowId, pid: pid)
+        guard AXWindowService.closeWindow(windowId: windowId, pid: pid) else { return }
+        // A raw, unfiltered capture of every registered SkyLight event
+        // type confirmed that an AX-synthesized close can succeed --
+        // the window becomes genuinely unresolvable
+        // via AX within milliseconds -- while macOS never delivers the
+        // corresponding windowClosed/spaceWindowDestroyed notification
+        // at all, not merely late. The periodic reconciler still catches
+        // this eventually via its own independent liveness sweep (~10s
+        // worst case), but this process just confirmed the press
+        // succeeded, so there's no reason to wait that long: a short,
+        // bounded recheck here closes the gap to well under a second
+        // instead. Synthesizes the same .closed event a genuine
+        // notification would have produced, so it goes through the
+        // existing spurious-destroy guard unchanged -- if the window
+        // turns out to still be alive by then, nothing happens.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard AXWindowService.findAXWindow(windowId: windowId, pid: pid) == nil else {
+                return
+            }
+            FrameLog.emit(source: .cmdClose, windowId: windowId, pid: pid,
+                          result: "confirmed-gone after press, forcing destroy")
+            SkyLightEventObserver.shared.delegate?.skyLightEventObserver(
+                SkyLightEventObserver.shared, didReceive: .closed(windowId: windowId))
+        }
     }
 
     private func executeHideWindows(_ windowIds: [UInt32]) {

@@ -267,7 +267,8 @@ enum AXWindowService {
     @discardableResult
     static func closeWindow(windowId: UInt32, pid: pid_t) -> Bool {
         guard let axWindow = findAXWindow(windowId: windowId, pid: pid) else {
-            logger.debug("AX window not found for close: wid=\(windowId) pid=\(pid)")
+            FrameLog.emit(source: .cmdClose, windowId: windowId, pid: pid,
+                          result: "window-not-found")
             return false
         }
 
@@ -279,12 +280,14 @@ enum AXWindowService {
         )
 
         guard result == .success, let closeButtonRef else {
-            logger.debug("No close button for wid=\(windowId)")
+            FrameLog.emit(source: .cmdClose, windowId: windowId, pid: pid,
+                          result: "no-close-button")
             return false
         }
 
         guard CFGetTypeID(closeButtonRef) == AXUIElementGetTypeID() else {
-            logger.debug("Close button is not an AXUIElement for wid=\(windowId)")
+            FrameLog.emit(source: .cmdClose, windowId: windowId, pid: pid,
+                          result: "not-an-element")
             return false
         }
 
@@ -298,12 +301,13 @@ enum AXWindowService {
         )
 
         if pressResult != .success {
-            logger.debug(
-                "AXPress on close button failed for wid=\(windowId): \(pressResult.rawValue)"
-            )
+            FrameLog.emit(source: .cmdClose, windowId: windowId, pid: pid,
+                          result: "press-failed \(pressResult.rawValue)")
             return false
         }
 
+        FrameLog.emit(source: .cmdClose, windowId: windowId, pid: pid,
+                      result: "pressed")
         return true
     }
 
