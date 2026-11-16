@@ -99,6 +99,7 @@ import Data.Word (Word32)
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Monoid (Endo(..))
 import Data.Ord (Down(..), comparing)
+import Data.Text (Text)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
@@ -781,6 +782,21 @@ crossedScreenTag wr rect ws = do
 unmanagedOriginTTL :: NominalDiffTime
 unmanagedOriginTTL = 4 * 3600
 
+-- | Apps whose pid never really "has one window" in the sense this
+-- heuristic assumes. It infers that a pid's next window is probably the
+-- one that just closed, resuming the same session -- true for Gecko's
+-- fullscreen round-trip, the case it was built for. Finder is a single,
+-- never-quitting system process backing every "Temp" navigator window;
+-- closing one and opening another minutes later for an unrelated task
+-- looks identical to the heuristic, but is not a continuation of
+-- anything, so it would otherwise route a brand new, unrelated Finder
+-- window back to wherever the last one happened to close -- for up to
+-- 'unmanagedOriginTTL'.
+isPidOriginExempt :: Maybe Text -> Bool
+isPidOriginExempt bundleId = bundleId `elem` map Just exemptBundleIds
+  where
+    exemptBundleIds = ["com.apple.finder"]
+
 -- | Upper bound on remembered destroy-origins; pathological churn of
 -- single-window apps must not grow the map without limit.
 unmanagedOriginCap :: Int
@@ -1084,6 +1100,7 @@ unmanage w = do
         now <- io getCurrentTime
         let lastOfPid = not (any (\o -> o /= w && wrPid o == wrPid w)
                                  (W.allWindows ws))
+        bundleId <- gets (\s -> M.lookup w (windowMetadata s) >>= wmBundleId)
         case W.findTag w ws of
             Just tag -> do
                 -- Exact-window origin, recorded unconditionally: if this
@@ -1094,7 +1111,7 @@ unmanage w = do
                         M.insert w (tag, now)
                                  (pruneReclaims now (reclaimOrigin s))
                     }
-                when lastOfPid $ modify $ \s -> s
+                when (lastOfPid && not (isPidOriginExempt bundleId)) $ modify $ \s -> s
                     { unmanagedOrigin =
                         M.insert (wrPid w) (tag, now)
                                  (pruneOrigins now (unmanagedOrigin s))
